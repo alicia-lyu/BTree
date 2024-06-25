@@ -18,6 +18,7 @@
 
 #include "fc/details.h"
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <cassert>
 #include <cstdint>
