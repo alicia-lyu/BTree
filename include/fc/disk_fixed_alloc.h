@@ -36,6 +36,7 @@ public:
       throw std::invalid_argument("pool ptr is not aligned with T/T*");
     }
     if (pool_byte_size < sizeof(T)) {
+      std::cerr << "pool_ptr: " << std::bit_cast<std::size_t>(pool_ptr) << ", pool_byte_size: " << pool_byte_size << ". size of T: " << sizeof(T) << std::endl;
       throw std::invalid_argument("pool byte size is too small");
     }
     if ((pool_byte_size % alignof(T)) || (pool_byte_size % sizeof(T *))) {
