@@ -168,7 +168,9 @@ requires(Fanout >= 2) class BTreeBase {
 #endif // FC_USE_SIND
     using keys_type =
         std::conditional_t<is_disk_, std::array<V, disk_max_nkeys>,
-                           std::vector<V>>;
+                           std::vector<V>>; 
+    // TODO: Add conditional is_variable_ to be a separately defined node page structure
+    // For non-leaf nodes, replace this for is_variable_ || is_disk_ with separate keys 
 
     // invariant: except root, t - 1 <= #(key) <= 2 * t - 1
     // invariant: for root, 0 <= #(key) <= 2 * t - 1
