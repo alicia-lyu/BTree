@@ -1,4 +1,14 @@
-# B-Tree
+# B-Tree For Database
+
+This repository is built on top of a general-purpose B-Tree, [frozenca/BTree](https://github.com/frozenca/BTree), and adds the following features to better support for database systems:
+
+1. The original data structure stores data both in branch nodes and leaf nodes, leading to a large memory requirement for the tree branches, if all branch nodes were to be stored in memory. The design used in most database systems today is to store only the separator keys in the branch nodes, see Modern B-Tree Techniques, Chapter 2.1.
+2. It follows that the use of mmap files are restricted to the leaf nodes. The branch nodes are designed to stay in memory during the lifetime of the B-Tree.
+3. The storage design of the leaf nodes are optimized page-wise, which supports variable-length records. I use the design of Modern B-Tree Techniques, Chapter 3.3.
+
+The following is the original README of the [frozenca/BTree](https://github.com/frozenca/BTree).
+
+## B-Tree
 
 This library implements a general-purpose header-only STL-like B-Tree in C++, including supports for using it for memory-mapped disk files and fixed-size allocators.
 
@@ -8,7 +18,7 @@ Just like ordered associative containers in the C++ standard library, key-value 
 
 There are four specialized B-Tree classes: ```frozenca::BTreeSet```, ```frozenca::BTreeMultiSet```, ```frozenca::BTreeMap``` and ```frozenca::BTreeMultiMap```, which corresponds to ```std::set```, ```std::multiset```, ```std::map``` and ```std::multimap``` respectively.
 
-## How to use
+### How to use
 
 This library is header-only, so no additional setup process is required beyond including the headers.
 
@@ -25,7 +35,7 @@ Install one of package BTree..rpm or BTree..deb or include this project into you
  ```
 
 
-## Target OS/Compiler version
+### Target OS/Compiler version
 
 This library aggressively uses C++20 features, and verified to work in gcc 11.2 and MSVC 19.32.
 
@@ -33,14 +43,14 @@ POSIX and Windows operating systems are supported in order to use the memory-map
 
 There are currently no plans to support C++17 and earlier.
 
-## Example usages
+### Example usages
 
 Usage is very similar to the C++ standard library ordered associative containers (i.e. ```std::set``` and its friends)
 
 ```cpp
-#include "fc/btree.h"
-#include <iostream>
-#include <string>
+##include "fc/btree.h"
+##include <iostream>
+##include <string>
 
 int main() {
   namespace fc = frozenca;
@@ -92,7 +102,7 @@ Users can specify a fanout parameter for B-tree: the default is 64.
 
 The smallest possible value for fanout is 2, where a B-Tree boils down to an [2-3-4 tree](https://en.wikipedia.org/wiki/2%E2%80%933%E2%80%934_tree) 
 
-## Supported operations
+### Supported operations
 
 Other than regular operations supported by ```std::set``` and its friends (```lower_bound()```, ```upper_bound()```, ```equal_range()``` and etc), the following operations are supported.
 
@@ -116,27 +126,27 @@ Other than regular operations supported by ```std::set``` and its friends (```lo
 
 ```frozenca::split(Tree&& tree, key_type key1, key_type key2)``` : Splits a tree to two trees, so that the first tree contains keys less than ```key1```, and the second tree contains keys greater than ```key2```. ```key2``` must be greater than or equal to ```key1```. Time complexity: ```O(log n) + O(k)```
 
-## Iterators
+### Iterators
 STL compatible iterators are fully supported. (both ```const``` and non-```const```) However, unlike ```std::set``` and its friends, all insert and erase operations can invalidate iterators. This is because ```std::set``` and its friends are node-based containers where a single node can only have a single key, but a node in B-Trees can have multiple keys.
 
-## Concurrency
+### Concurrency
 
 Currently, thread safety is not guaranteed. Lock-free support is the first TODO, but contributions are welcome if you're interested.
 
-## Linear search vs Binary search
+### Linear search vs Binary search
 
 The core operation for B-Tree is a search in the sorted key array of each node. For small arrays with primitive key types that have relatively cheap comparisons, linear search is often better than binary search. This threshold may vary by compiler by a big margin.
 
 If you use Clang, I recommend that you set this variable to 1. For gcc users, it seems better not to change the variable (may be changed by future gcc optimizations)
 https://github.com/frozenca/BTree/blob/7083e8034b5905552cc6a3b8277452c56c05d587/fc_btree.h#L22
 
-## SIMD Operation
+### SIMD Operation
 
 When keys are signed integers or floating point types, if your machine supports AVX-512, you can activate SIMD intrinsics to speed up B-Tree operations, by setting this variable to 1:
 https://github.com/frozenca/BTree/blob/3498a53e75e916015561008cf91fecc3f7df69d1/fc_btree.h#L4
 (Inspired from: [Static B-Trees](https://en.algorithmica.org/hpc/data-structures/s-tree/))
 
-## Disk B-Tree
+### Disk B-Tree
 
 You can use a specialized variant that utilizes memory-mapped disk files and an associated fixed-size allocator. You have to include ```fc_disk_btree.h```, ```fc_disk_fixed_alloc.h``` and ```fc_mmfile.h``` to use it.
 
@@ -148,11 +158,11 @@ The following code initializes a ```frozenca::DiskBTreeSet```, which generates a
 fc::DiskBTreeSet<std::int64_t, 128> btree("database.bin", 1UL << 25UL, true);
 ```
 
-## Serialization and deserialization
+### Serialization and deserialization
 
 Serialization/deserialization of B-Trees via byte streams using ```operator<<``` and ```operator>>``` is also supported when key types (and value types, if present) meet the above requirements for disk B-Tree. You can refer how to do serialization/deserialization in ```test/rwtest.cpp```.
 
-## Performance
+### Performance
 
 Using a performance test code similar with ```test/perftest.cpp```, that inserts/retrieves/erases 1 million ```std::int64_t``` in random order, I see the following results in my machine (gcc 11.2, -O3, 200 times repeated per each target), compared to ```std::set``` and Google's B-Tree implementation(https://code.google.com/archive/p/cpp-btree/):
 
@@ -219,7 +229,7 @@ Time to erase 1000000 elements: Average : 1639.79ms, Stdev   : 82.7256ms, 95%   
 ```
 
 
-## Sanity check and unit test
+### Sanity check and unit test
 
 If you want to contribute and test the code, pay attention and use macro _CONTROL_IN_TEST, which will do full sanity checks on the entire tree:
 
@@ -229,6 +239,6 @@ https://github.com/frozenca/BTree/blob/adf3c3309f45a65010d767df674c232c12f5c00a/
 and by running ```test/unittest.cpp``` you can verify basic operations.
 
 
-## License
+### License
 
 This library is licensed under either of Apache License Version 2.0 with LLVM Exceptions (LICENSE-Apache2-LLVM or https://llvm.org/foundation/relicensing/LICENSE.txt) or Boost Software License Version 1.0 (LICENSE-Boost or https://www.boost.org/LICENSE_1_0.txt).
