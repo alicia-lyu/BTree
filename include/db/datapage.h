@@ -16,15 +16,15 @@
 // Complication is we should not expect memory space for the leaf nodes---they are just to push balance in the branches.
 // FINAL:
 // Manage leaf nodes (pages separately). Add a leaves_ field to BTree::Node.
-// 1. Search: Instead of searching for a key in the leaf nodes, search for its lower bound which exists in the pseudo-leaf nodes. 
+// 1. Search: Instead of searching for a key in the leaf nodes, search for its lower bound which exists in the pseudo-leaf nodes.
 // The pseudo leaf nodes should have a pointer to the actual leaf node (I/O needed), where the key is searched again.
-// 2. Insertion: If a leaf node has space for the insertion, no action needed on the tree. 
-// Otherwise, split the node and insert the lower bound value of the right leaf into the tree. 
+// 2. Insertion: If a leaf node has space for the insertion, no action needed on the tree.
+// Otherwise, split the node and insert the lower bound value of the right leaf into the tree.
 // Adjust the leaves_ data member.
 // 3. Deletion: No merge attempted. Just delete it from leaf node. No action needed on the tree.
 //
 // Why we need a new class instead of just extending Node?
-// Node is not a standalone class but part of the BTree. 
+// Node is not a standalone class but part of the BTree.
 // Insertions, search, deletions, and IO are all managed by the BTree.
 
 template <size_t PAGE_SIZE = 4000>
@@ -73,34 +73,52 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   Key &&get_key(size_t index) {
     auto record = get_record(index);
     Key key;
-    std::copy(record.begin(), record.begin() + KEY_SIZE, key.begin())
-    return std::move(key);
+    std::copy(record.begin(), record.begin() + KEY_SIZE, key.begin()) return std::move(key);
+  }
+
+  size_t get_occupancy_in_range(size_t left, size_t right) {
+    size_t occupied = 0;
+    for (size_t i = left; i < right; i++) {
+      if (bitmap_[i] = true) occupied++;
+    }
+    return occupied;
   }
 
   size_t search_lb(const KeyOrRecord &key_or_record) {
     if (bitmap_.count() == 0) return 0;
-    size_t left = 0;                // inclusive
-    size_t right = bitmap_.size();  // exclusive
-    while (left + 1 < right)        // lock in to one entry
+    size_t left = find_first_occupied(0);  // inclusive
+    if (std::memcmp(key_or_record.data(), records.at(left).data(), key_or_record.size()) == 0)
+      return left;  // Early return helps guarantee left is smaller
+
+    size_t right = find_first_occupied(bitmap_.size()) + 1;  // exclusive
+    // Note that left is guaranteed to be occupied, while right is not.
+    while (get_occupancy_in_range(left, right) <= 1)  // lock in to one entry
     {
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
       auto record_mid = get_record(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
       int ret = std::memcmp(key_or_record.data(), record_mid.data(), key_or_record.size());
       if (ret < 0)  // lb is less than mid
         right = mid;
-      else if (ret == 0)
-        right = mid + 1;  // lb is less than or equal to mid
-      else if (ret > 0)
-        left = mid;  // lb is greater than or equal to mid (although mid is smaller, but mid+1 can be bigger)
+      else if (ret == 0)  // lb is less than or equal to mid
+      {
+        right = mid + 1;
+        // Only having `right = mid + 1` may enter into infinite loop, when right keeps being reset to left + 2
+        if (get_occupancy_in_range(left, right) == 2) {  // 2: left and mid
+          // left is guaranteed to be smaller (comes from the last arm)
+          left = mid;
+        }
+      } else if (ret > 0)  // lb is greater than or equal to mid (although mid is smaller, but mid+1 can be bigger)
+        left = mid;
     }
+    // If there is any element equal to key_or_record, left is equal.
     return left;
   }
 
   size_t search_ub(const KeyOrRecord &key_or_record) {
     if (bitmap_.count() == 0) return 0;
-    size_t left = 0;                // inclusive
-    size_t right = bitmap_.size();  // exclusive
-    while (left + 1 < right)        // lock in to one entry
+    size_t left = find_first_occupied(0);                    // inclusive
+    size_t right = find_first_occupied(bitmap_.size()) + 1;  // exclusive
+    while (get_occupancy_in_range(left, right) <= 1)         // lock in to one entry
     {
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
       auto record_mid = get_record(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
@@ -110,28 +128,17 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
       else if (ret >= 0)  // ub is greater than mid
         left = mid + 1;
     }
+    // ub is guaranteed to be not equal, regardless of whether a match exists.
     return left;
   }
 
-  std::optional<size_t> search(const KeyOrRecord &key_or_record)
-  // Non-expected behavior if the searched item is not unique in the data page.
-  {
-    size_t left = 0;                // inclusive
-    size_t right = bitmap_.size();  // exclusive
-    while (left < right)            // lock in to one entry
-    {
-      size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
-      if (mid == RECORD_COUNT) return std::nullopt;
-      auto record_mid = get_record(mid);
-      int ret = std::memcmp(key_or_record.data(), record_mid.data(), key_or_record.size());
-      if (ret < 0)
-        right = mid;
-      else if (ret == 0)
-        return mid;
-      else if (ret > 0)
-        left = mid + 1;
-    }
-    return std::nullopt;
+  std::optional<size_t> search(const KeyOrRecord &key_or_record) {
+    auto lb = search_lb(key_or_record);
+    auto record_lb = records.at(lb);
+    if (std::memcmp(key_or_record.data(), record_lb, key_or_record.size()) == 0)
+      return lb;
+    else
+      return std::nullopt;
   }
 
   size_t find_first_occupied(size_t index, size_t lower_bound = 0, size_t upper_bound = RECORD_COUNT)
@@ -152,20 +159,19 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     if (bitmap_.count() == RECORD_COUNT) return false;
     // page is full, split managed by page owner
     auto ub = search_ub(record);
-    if (bitmap_[ub] == 0)
+    if (bitmap_[ub] == 0) {
       get_record(ub).swap(record);
-    else {  // elements moving is inevitable
-      records.insert(records.begin() + ub, record);
-      // temporarily grows larger than DATA_SIZE
-      auto records_iter = records.end();
-      for (size_t i = RECORD_COUNT - 1; i >= 0; i--) {
-        // erasing from the tail is more efficient
-        if (bitmap_[i] == false) {
-          records.erase(records_iter);
-          bitmap_[i] = true;
-          break;
-        }
-        records_iter--;
+      bitmap_[ub] = true;
+      return true
+    }
+    // Moving elements is inevitable
+    records.insert(records.begin() + ub, record); // temporarily grows larger than DATA_SIZE
+    // Erasing from the tail is more efficient
+    auto records_iter = records.end();
+    for (size_t i = RECORD_COUNT - 1; i >= 0; i--) {
+      if (bitmap_[i] == false) {
+        records.erase(records_iter - i);
+        break;
       }
     }
   }
