@@ -17,6 +17,7 @@
 #endif // FC_USE_SIMD
 
 #include "fc/details.h"
+#include "db/datapage.h"
 #include <algorithm>
 #include <bit>
 #include <array>
@@ -189,6 +190,9 @@ requires(Fanout >= 2) class BTreeBase {
     std::vector<std::conditional_t<is_disk_, std::unique_ptr<Node, Deleter>,
                                    std::unique_ptr<Node>>>
         children_;
+    
+    std::vector<DataPage> leaves_ = {}; 
+    // Should only have elements when children_ is empty
 
     Node() { keys_.reserve(disk_max_nkeys); }
 
