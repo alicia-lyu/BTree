@@ -191,7 +191,7 @@ requires(Fanout >= 2) class BTreeBase {
                                    std::unique_ptr<Node>>>
         children_;
     
-    std::vector<DataPage> leaves_ = {}; 
+    std::vector<DataPage&> leaves_ = {}; 
     // Should only have elements when children_ is empty
 
     Node() { keys_.reserve(disk_max_nkeys); }
