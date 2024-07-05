@@ -48,12 +48,13 @@ template <size_t PAGE_SIZE = 4000, size_t RECORD_SIZE, size_t KEY_SIZE>
 class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   static constexpr size_t RECORD_COUNT = PAGE_SIZE / RECORD_SIZE;
   static constexpr size_t DATA_SIZE = PAGE_SIZE - RECORD_COUNT / 8;
-  using Record = typename std::array<unsigned char, RECORD_SIZE>;
-  using Key = typename std::array<unsigned char, KEY_SIZE>;
-  using KeyOrRecord = typename std::variant<Record, Key>;
   using vec_iter_type = typename std::vector<Record>::iterator;
 
  public:
+  using Record = typename std::array<unsigned char, RECORD_SIZE>;
+  using Key = typename std::array<unsigned char, KEY_SIZE>;
+  using KeyOrRecord = typename std::variant<Record, Key>;
+
   std::bitset<RECORD_COUNT> bitmap_;  // 0 for free, 1 for occupied
   std::vector<Record> records;
 
@@ -149,6 +150,8 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     Record* operator->() { return &(*vec_iter); }
 
     vec_iter_type base() { return vec_iter; }
+
+    page* get_page() { return page_; }
   };
 
   Iterator begin() { return Iterator(this, records.begin()); }
