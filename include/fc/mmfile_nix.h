@@ -119,6 +119,21 @@ class MemoryMappedFileImpl {
 
   [[nodiscard]] const void *data() const noexcept { return data_; }
 
+  // Method to get a pointer to a specific page and ensure the full page is read into memory
+  void* get_page_ptr(std::uint64_t file_offset, std::size_t page_size) {
+    if (file_offset + page_size >= size_) {
+      throw std::out_of_range("File offset out of range");
+    }
+    unsigned char* page_start = static_cast<unsigned char*>(data_) + file_offset; // No actual IO until accessed
+
+    // Advise the kernel to read the full page into memory
+    if (madvise(page_start, page_size, MADV_WILLNEED) != 0) {
+      throw std::runtime_error("madvise failed");
+    }
+
+    return page_start;
+  }
+
   friend bool operator==(const MemoryMappedFileImpl &mmfile1,
                          const MemoryMappedFileImpl &mmfile2) {
     auto res =
