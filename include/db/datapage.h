@@ -30,24 +30,28 @@
 // Node is not a standalone class but part of the BTree.
 // Insertions, search, deletions, and IO are all managed by the BTree.
 
-template <size_t PAGE_SIZE = 4000, class Istream = std::ifstream, class Ostream = std::ofstream>
+template <size_t PAGE_SIZE, class Istream = std::ifstream, class Ostream = std::ofstream>
 class DataPage {
- public:
-  const std::filesystem::path path;
-  const size_t file_offset;
+ protected:
+  using MMapFile = frozenca::MemoryMappedFileImpl;
 
-  DataPage(std::filesystem::path path, size_t file_offset) : path(std::move(path)), file_offset(file_offset) {}
+ public:
+  uintmax_t next_page_offset = 0;
+
+  void* get_mmap_ptr(MMapFile& mmap_file, uintmax_t file_offset, std::size_t offset = 0) {
+    return reinterpret_cast<void*>(static_cast<unsigned char*>(mmap_file.get_page_ptr(file_offset)) + offset + sizeof(uintmax_t));
+  }
+
+  DataPage(MMapFile& mmap_file, uintmax_t file_offset) : next_page_offset(std::bit_cast<uintmax_t>(get_mmap_ptr(mmap_file, file_offset))) {}
 
   virtual ~DataPage() = default;
-
-  virtual void flush() = 0;
 };
 
-template <size_t PAGE_SIZE = 4000, size_t RECORD_SIZE, size_t KEY_SIZE>
-  requires(PAGE_SIZE - PAGE_SIZE / RECORD_SIZE / 8 >= RECORD_SIZE)
+template <size_t PAGE_SIZE, size_t RECORD_SIZE, size_t KEY_SIZE>
 class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   static constexpr size_t RECORD_COUNT = PAGE_SIZE / RECORD_SIZE;
-  static constexpr size_t DATA_SIZE = PAGE_SIZE - RECORD_COUNT / 8;
+  static constexpr size_t DATA_SIZE = PAGE_SIZE - RECORD_COUNT / 8 - sizeof(uintmax_t);
+
   using vec_iter_type = typename std::vector<Record>::iterator;
 
  public:
@@ -56,32 +60,24 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   using KeyOrRecord = typename std::variant<Record, Key>;
 
   std::bitset<RECORD_COUNT> bitmap_;  // 0 for free, 1 for occupied
-  std::vector<Record> records;
+  std::vector<Record> records_;
 
-  FixedRecordDataPage(std::filesystem::path path, size_t file_offset) : DataPage<PAGE_SIZE>(std::move(path), file_offset), records(RECORD_COUNT) {
-    Istream file(this->path, std::ios::binary | std::ios::in);
-    if (!file) {
-      throw std::runtime_error("Failed to open file for reading");
-    }
-    file.seekg(this->file_offset);
-    file.read(reinterpret_cast<char*>(&bitmap_), sizeof(bitmap_));
-    file.read(reinterpret_cast<char*>(records.data()), sizeof(records));
+  // New constructor to use memory-mapped file directly
+  FixedRecordDataPage(MMapFile& mmap_file, uintmax_t file_offset)
+      : bitmap_(*new(get_mmap_ptr(mmap_file, file_offset)) std::bitset<RECORD_COUNT>),
+        records_(*new(get_mmap_ptr(mmap_file, file_offset, sizeof(std::bitset<RECORD_COUNT>))) std::vector<Record>(RECORD_COUNT)) {
+    assert(file_offset % alignof(FixedRecordDataPage));
   }
 
-  ~FixedRecordDataPage() override { flush(); }
+  FixedRecordDataPage() { records_.reserve(RECORD_COUNT); }
 
-  void flush() override {
-    Ostream file(this->path, std::ios::binary | std::ios::out);
-    if (!file) {
-      throw std::runtime_error("Failed to open file for writing");
-    }
-    assert(sizeof(bitmap_) + sizeof(records) == PAGE_SIZE);
-    file.seekp(this->file_offset);
-    file.write(reinterpret_cast<char*>(&bitmap_), sizeof(bitmap_));
-    file.write(reinterpret_cast<char*>(records.data()), sizeof(records));
+  ~FixedRecordDataPage() {
+    bitmap_.~bitset();
+    records_.~vector();
+    // un-schematize but deallocation is deferred to mmap
   }
 
-  Record& get_record(size_t index) { return records.at(index); }
+  Record& get_record(size_t index) { return records_.at(index); }
 
   Key get_key(size_t index) {
     auto record = get_record(index);
@@ -100,32 +96,32 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     return occupied;
   }
 
-  bool get_bit(vec_iter_type rec_it) { return bitmap_[std::distance(records.begin(), rec_it)]; }
+  bool get_bit(vec_iter_type rec_it) { return bitmap_[std::distance(records_.begin(), rec_it)]; }
 
-  void flip_bit(vec_iter_type rec_it) { bitmap_.flip(std::distance(records.begin(), rec_it)); }
+  void flip_bit(vec_iter_type rec_it) { bitmap_.flip(std::distance(records_.begin(), rec_it)); }
 
-  void set_bit(vec_iter_type rec_it, bool value = true) { bitmap_.set(std::distance(records.begin(), rec_it), value); }
+  void set_bit(vec_iter_type rec_it, bool value = true) { bitmap_.set(std::distance(records_.begin(), rec_it), value); }
 
   class Iterator : public std::iterator<std::bidirectional_iterator_tag, Record> {
     FixedRecordDataPage* page_;
     vec_iter_type vec_iter;
 
     void advance_to_valid() {
-      while (vec_iter < page_->records.end() && !page_->bitmap_[index()]) {
+      while (vec_iter < page_->records_.end() && !page_->bitmap_[index()]) {
         ++vec_iter;
       }
     }
 
     void retreat_to_valid() {
-      while (vec_iter >= page_->records.begin() && !page_->bitmap_[index()]) {
+      while (vec_iter >= page_->records_.begin() && !page_->bitmap_[index()]) {
         --vec_iter;
       }
     }
 
-    size_t index() { return std::distance(page_->records.begin(), vec_iter); }
+    size_t index() { return std::distance(page_->records_.begin(), vec_iter); }
 
    public:
-    Iterator(FixedRecordDataPage* page, size_t index) : page_(page), vec_iter(page->records.begin() + index) { advance_to_valid(); }
+    Iterator(FixedRecordDataPage* page, size_t index) : page_(page), vec_iter(page->records_.begin() + index) { advance_to_valid(); }
 
     Iterator(FixedRecordDataPage* page, vec_iter_type vec_iter) : page_(page), vec_iter(vec_iter) { advance_to_valid(); }
 
@@ -154,9 +150,9 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     page* get_page() { return page_; }
   };
 
-  Iterator begin() { return Iterator(this, records.begin()); }
+  Iterator begin() { return Iterator(this, records_.begin()); }
 
-  Iterator end() { return Iterator(this, records.end()); }
+  Iterator end() { return Iterator(this, records_.end()); }
 
   bool get_bit(Iterator it) { return get_bit(it.base()); }
 
@@ -168,7 +164,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   Iterator search_lb(const KeyOrRecord& key_or_record) {
     if (bitmap_.count() == 0) return end();
     size_t left = find_first_occupied(0);  // inclusive
-    if (std::memcmp(key_or_record.data(), records.at(left).data(), key_or_record.size()) == 0)
+    if (std::memcmp(key_or_record.data(), records_.at(left).data(), key_or_record.size()) == 0)
       return Iterator(this, left);  // Early return helps guarantee left is smaller
 
     size_t right = find_first_occupied(RECORD_COUNT) + 1;  // exclusive
@@ -247,30 +243,30 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
       return ub;
     }
     // Moving elements is inevitable
-    records.insert(ub.base(), record);  // temporarily grows larger than DATA_SIZE
+    records_.insert(ub.base(), record);  // temporarily grows larger than DATA_SIZE
     // Erasing from the tail is more efficient
     bool before_ub = false;
-    auto records_it = records.end();
-    while (records_it >= records.begin()) {
-      if (!get_bit(records_it)) {
-        records.erase(records_it);
-        if (records_it < ub.base()) before_ub = true;
+    auto records__it = records_.end();
+    while (records__it >= records_.begin()) {
+      if (!get_bit(records__it)) {
+        records_.erase(records__it);
+        if (records__it < ub.base()) before_ub = true;
         break;
       }
-      --records_it;
+      --records__it;
     }
     // Bitmap knows nothing about insertion and erasion yet.
     if (before_ub) {
-      // all bits between (records_it, ub-1] need to shift 1 pos forward, overwriting bitmap[records_it]
-      while (records_it < (ub--).base()) {
-        set_bit(records_it, get_bit(records_it++));
+      // all bits between (records__it, ub-1] need to shift 1 pos forward, overwriting bitmap[records__it]
+      while (records__it < (ub--).base()) {
+        set_bit(records__it, get_bit(records__it++));
       }
       // leaving an empty seat at ub-1, which should be set to true
       set_bit(ub, true);
     } else {
-      // all bit between [ub, records_it) need to shift 1 pos backward, overwriting bitmap[records_it]
-      while (records_it > ub.base()) {
-        set_bit(records_it, get_bit(records_it--));
+      // all bit between [ub, records__it) need to shift 1 pos backward, overwriting bitmap[records__it]
+      while (records__it > ub.base()) {
+        set_bit(records__it, get_bit(records__it--));
       }
       // leaving an empty seat at ub, which should be set to true
       set_bit(ub, true);
@@ -303,7 +299,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     size_t right_index = 0;
     for (size_t i = mid; i < RECORD_COUNT; ++i) {
       if (bitmap_[i] == 1) {
-        right_sibling.records.at(right_index).swap(records.at(i));
+        right_sibling.records_.at(right_index).swap(records_.at(i));
         bitmap_[i] = 0;
         right_sibling.bitmap_[right_index] = 1;
         ++right_index;

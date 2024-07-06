@@ -47,6 +47,7 @@ public:
     // size in chunks
     pool_size_ = pool_byte_size / sizeof(T);
 
+    // Initialize a linked list of free chunks
     auto curr_chunk = pool_;
     for (size_t i = 0; i < pool_size_; i++, curr_chunk++) {
       *(reinterpret_cast<uint64_t *>(curr_chunk)) =
