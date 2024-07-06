@@ -1,6 +1,7 @@
+#ifndef DATAPAGE_H
+#define DATAPAGE_H
+
 #include <stddef.h>
-#include <filesystem>
-#include <fstream>
 #include <array>
 #include <vector>
 #include <bitset>
@@ -8,6 +9,8 @@
 #include <cstring>
 #include <iterator>
 #include <cassert>
+
+#include "fc/mmfile_nix.h"
 
 // Only having separator keys in the branch nodes entails
 // Using a BTreeSet or MultiSet as the tree's container, which should stay in memory during the lifetime of BTree.
@@ -30,21 +33,19 @@
 // Node is not a standalone class but part of the BTree.
 // Insertions, search, deletions, and IO are all managed by the BTree.
 
-template <size_t PAGE_SIZE, class Istream = std::ifstream, class Ostream = std::ofstream>
+template <size_t PAGE_SIZE>
 class DataPage {
  protected:
   using MMapFile = frozenca::MemoryMappedFileImpl;
-
- public:
   uintmax_t next_page_offset = 0;
-
-  void* get_mmap_ptr(MMapFile& mmap_file, uintmax_t file_offset, std::size_t offset = 0) {
-    return reinterpret_cast<void*>(static_cast<unsigned char*>(mmap_file.get_page_ptr(file_offset)) + offset + sizeof(uintmax_t));
-  }
 
   DataPage(MMapFile& mmap_file, uintmax_t file_offset) : next_page_offset(std::bit_cast<uintmax_t>(get_mmap_ptr(mmap_file, file_offset))) {}
 
   virtual ~DataPage() = default;
+
+  void* get_mmap_ptr(MMapFile& mmap_file, uintmax_t file_offset, std::size_t offset = 0) {
+    return reinterpret_cast<void*>(static_cast<unsigned char*>(mmap_file.get_page_ptr(file_offset, PAGE_SIZE)) + offset + sizeof(uintmax_t));
+  }
 };
 
 template <size_t PAGE_SIZE, size_t RECORD_SIZE, size_t KEY_SIZE>
@@ -52,12 +53,12 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   static constexpr size_t RECORD_COUNT = PAGE_SIZE / RECORD_SIZE;
   static constexpr size_t DATA_SIZE = PAGE_SIZE - RECORD_COUNT / 8 - sizeof(uintmax_t);
 
-  using vec_iter_type = typename std::vector<Record>::iterator;
-
  public:
-  using Record = typename std::array<unsigned char, RECORD_SIZE>;
-  using Key = typename std::array<unsigned char, KEY_SIZE>;
-  using KeyOrRecord = typename std::variant<Record, Key>;
+  using Record = std::array<unsigned char, RECORD_SIZE>;
+  using Key = std::array<unsigned char, KEY_SIZE>;
+  using KeyOrRecord = std::variant<Record, Key>;
+  using vec_iter_type = std::vector<Record>::iterator;
+  using typename DataPage<PAGE_SIZE>::MMapFile;
 
   std::bitset<RECORD_COUNT> bitmap_;  // 0 for free, 1 for occupied
   std::vector<Record> records_;
@@ -147,7 +148,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
     vec_iter_type base() { return vec_iter; }
 
-    page* get_page() { return page_; }
+    FixedRecordDataPage* get_page() { return page_; }
   };
 
   Iterator begin() { return Iterator(this, records_.begin()); }
@@ -312,3 +313,5 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 // Fixed-length key, variable-length value
 // template <size_t PAGE_SIZE = 4000, size_t KEY_SIZE>
 // class VariableVDataPage : public DataPage<PAGE_SIZE>
+
+#endif

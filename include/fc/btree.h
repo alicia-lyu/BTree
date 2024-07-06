@@ -615,7 +615,6 @@ public:
     begin_ = iterator_type(root_.get(), 0);
   }
 
-protected:
   static Node *rightmost_leaf(Node *curr) noexcept {
     while (curr && !curr->is_leaf()) {
       curr = curr->children_[std::ssize(curr->children_) - 1].get();
@@ -644,6 +643,7 @@ protected:
     return curr;
   }
 
+protected:
   void promote_root_if_necessary() {
     if (root_->empty()) {
       assert(std::ssize(root_->children_) == 1);
@@ -958,8 +958,10 @@ protected:
       auto i = get_lb(key, x);
       if (x->is_leaf()) {
         auto it = nonconst_iterator_type(x, static_cast<attr_t>(i));
+        // before climbing, if the lower bound is a key not in the leaf node, 
+        // it points to the end() of the largest leaf node that's smaller than key (leaf node lower bound)
         if (climb) {
-          it.climb();
+          it.climb(); //
         }
         return it;
       } else {

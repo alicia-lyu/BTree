@@ -1,3 +1,6 @@
+#ifndef DB_BTREE_H
+#define DB_BTREE_H
+
 #include "db/datapage.h"
 #include "fc/btree.h"
 #include "fc/mmfile_nix.h"  // WindowsOS not supported
@@ -9,32 +12,37 @@ template <bool AllowDup,
           size_t RECORD_SIZE,
           size_t KEY_SIZE>  // records and keys in data pages are stored as bytes (unsigned char), no additional type needed
 class FixedDBBTree {
-  using page_type = FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>;
-  using page_iter_type = page_type::Iterator;
-  using Record = page_type::Record;
-  using Key = page_type::Key;
-  using KeyOrRecord = page_type::KeyOrRecord;
-  using btree_type = std::conditional<AllowDup, frozenca::BTreeMultiSet<Key, Fanout>, frozenca::BTreeSet<Key, Fanout>>;
+  using Page = FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>;
+  using PageIterator = typename Page::Iterator;
+  using typename Page::Key;
+  using typename Page::KeyOrRecord;
+  using typename Page::Record;
+  using BTree = std::conditional<AllowDup, frozenca::BTreeMultiSet<Key, Fanout>, frozenca::BTreeSet<Key, Fanout>>;
+  // using BTree = frozenca::BTreeMultiSet<std::array<unsigned char, KEY_SIZE>, Fanout>;
+  using BTreeIter = typename BTree::iterator_type;
+  using BTreeNode = typename BTree::Node;
+
+  using Alloc = typename frozenca::AllocatorFixed<Page>;
 
   struct Deleter {  // from fc/btree.h
     [[no_unique_address]] Alloc alloc_;
     Deleter(const Alloc& alloc) : alloc_{alloc} {}
 
     template <typename T>
-    void operator()(T* node) noexcept {
-      alloc_.deallocate(node, 1);
+    void operator()(T* page) noexcept {
+      alloc_.deallocate(page, 1);
     }
   };
 
   using MMapFile = frozenca::MemoryMappedFileImpl;
-  using MemRes = frozenca::MemoryResourceFixed;
-  using Alloc = frozenca::AllocatorFixed<page_type>;
-  using page_ptr_type = std::unique_ptr<page_type, Deleter>;
+  using MemRes = frozenca::MemoryResourceFixed<Page>;
+  using PagePtr = std::unique_ptr<Page, Deleter>;
 
  public:
   const std::filesystem::path path;  // Only support a single file for leaves
   size_t size;                       // only counting valid records in leaves
   MMapFile mmap_file;
+  MemRes mem_res;
   const uint64_t new_mmap_file_size;
   Alloc alloc_;
 
@@ -42,11 +50,11 @@ class FixedDBBTree {
       : path(std::move(path)),
         mmap_file(this->path),
         new_mmap_file_size(std::max((1UL << 20UL), std::filesystem::file_size(path) / 10)),
-        alloc_([]() -> Alloc {
+        mem_res([this]() -> MemRes {
           auto new_mmap_file = MMapFile(std::filesystem::path("/temp/b-tree"), new_mmap_file_size, true);
-          auto mem_res = MemRes(new_mmap_file);
-          return Alloc(&mem_res);
-        }) {}
+          return MemRes(new_mmap_file);
+        }),
+        alloc_(Alloc(&mem_res)) {}
 
   static Key get_key(const Record& record) {
     Key key;
@@ -56,20 +64,20 @@ class FixedDBBTree {
 
   class Iterator : public std::iterator<std::bidirectional_iterator_tag, Record> {
     FixedDBBTree* tree_;
-    page_type* current_page_;
-    page_iter_type page_iter;
+    Page* current_page_;
+    PageIterator page_iter;
     // size_t index_; // Only counting valid // Too hard to maintain
 
     void advance_page();  // TODO
     void retreat_page();  // TODO
 
    public:
-    Iterator(FixedDBBTree* tree, page_iter_type page_iter) : tree_(tree), page_iter(page_iter), current_page_(page_iter.get_page()) {}
+    Iterator(FixedDBBTree* tree, PageIterator page_iter) : tree_(tree), page_iter(page_iter), current_page_(page_iter.get_page()) {}
 
     Iterator& operator++() {
-      if (page_iter++ == current_page_.end()) advance_page();
+      if (page_iter++ == current_page_->end()) advance_page();
       //   ++index_;
-      return *this
+      return *this;
     }
     Iterator& operator--() {
       if (page_iter-- == current_page_->begin()) retreat_page();
@@ -96,36 +104,42 @@ class FixedDBBTree {
   }
 
  private:
-  page_ptr_type make_page() {
+  PagePtr make_page() {
     auto buffer = alloc_.allocate(1);
-    page_type* page = new (buffer) page_type();
-    return page_ptr_type(page, Deleter(alloc_));
+    Page* page = new (buffer) Page();
+    return PagePtr(page, Deleter(alloc_));
   }
 
  public:
   Iterator insert(const Record& record) {
     Key key = get_key(record);
-    auto btree_it = branches->find_lower_bound(key, false);
-    auto node = *btree_it;
-    page_type leaf = node.leaves.at(btree_it.index_ + 1); // SCRUTINY required
+    BTreeIter btree_it = branches.find_upper_bound(key);
+    auto node = btree_it.node_;
+    if (!node->is_leaf()) {
+      node = branches.rightmost_leaf(node.children_[btree_it.index_]);
+    }
+    Page leaf = node.leaves.at(btree_it.index_ + 1);  // SCRUTINY required
     std::optional<Iterator> ret = leaf.insert(record);
     if (ret.has_value()) return Iterator(this, ret.value());
     // Split page
-    page_ptr_type page_ptr = make_page();
+    PagePtr page_ptr = make_page();
     Key mid_key = leaf.split_with(*page_ptr);
-    btree_type::iterator_type inserted_it;
+    BTreeIter inserted_it;
+
     if constexpr (AllowDup) {
-        inserted_it = branches.insert(mid_key);
+      inserted_it = branches.insert(mid_key);
     } else {
-        auto ret = branches.insert(mid_key);
-        if (!ret.second) throw std::runtime_error("Inserting duplicates not allowed.");
-        inserted_it = ret.first;
+      auto ret = branches.insert(mid_key);
+      if (!ret.second) throw std::runtime_error("Inserting duplicates not allowed.");
+      inserted_it = ret.first;
     }
     auto inserted_node = *inserted_it;
-    inserted_node.leaves[inserted_it.index_] = 
-    // How to handle leaves_ after rotation & splitting in branches?
+    
   }
 
  private:
-  std::unique_ptr<btree_type> branches;
+  //   std::unique_ptr<BTree> branches;
+  BTree branches;
 };
+
+#endif
