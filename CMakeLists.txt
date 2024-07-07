@@ -14,6 +14,15 @@ option(FORCE_PREFER_BINARY_SEARCH "force define FC_PREFER_BINARY_SEARCH (recomme
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Include Homebrew directories
+if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    if (EXISTS "/opt/homebrew")
+        list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+    else()
+        list(APPEND CMAKE_PREFIX_PATH "/usr/local")
+    endif()
+endif()
+
 find_package(VersionHeader)
 set(PROJECT_VERSION "${MAJOR}.${MINOR}.${PATCH}.${COMMITTER_SHORTSHA}")
 file(WRITE ${CMAKE_SOURCE_DIR}/VERSION.txt "${MAJOR}.${MINOR}.${PATCH}")
@@ -69,7 +78,8 @@ target_include_directories(
     BTree
     INTERFACE
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>" )
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"  
+    )
 
 add_library(BTree::BTree ALIAS BTree)
 
