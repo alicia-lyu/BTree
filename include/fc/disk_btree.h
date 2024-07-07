@@ -8,7 +8,7 @@ namespace frozenca {
 
 template <DiskAllocable K, DiskAllocable V, attr_t Fanout, typename Comp, bool AllowDup>
 class DiskBTreeBase
-    : public BTreeBase<K, V, Fanout, Comp, AllowDup, AllocatorFixed, false> {
+    : public BTreeBase<K, V, Fanout, Comp, AllowDup, AllocatorFixed> {
 public:
   using Base = BTreeBase<K, V, Fanout, Comp, AllowDup, AllocatorFixed>;
   using Node = typename Base::node_type;

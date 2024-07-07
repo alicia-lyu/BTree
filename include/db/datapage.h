@@ -66,9 +66,10 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
  public:
   // New constructor to use memory-mapped file directly
   FixedRecordDataPage(MMapFile& mmap_file, uintmax_t file_offset)
-      : bitmap_(*new(get_mmap_ptr(mmap_file, file_offset)) std::bitset<RECORD_COUNT>),
-        records_(*new(get_mmap_ptr(mmap_file, file_offset, sizeof(std::bitset<RECORD_COUNT>))) std::vector<Record>(RECORD_COUNT)) {
-    assert(file_offset % alignof(FixedRecordDataPage));
+      : DataPage<PAGE_SIZE>(mmap_file, file_offset),
+        bitmap_(*new(this->get_mmap_ptr(mmap_file, file_offset)) std::bitset<RECORD_COUNT>),
+        records_(*new(this->get_mmap_ptr(mmap_file, file_offset, sizeof(std::bitset<RECORD_COUNT>))) std::vector<Record>(RECORD_COUNT)) {
+    assert(file_offset % PAGE_SIZE == 0);
   }
 
   FixedRecordDataPage() { records_.reserve(RECORD_COUNT); }
@@ -125,8 +126,6 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
       }
     }
 
-    size_t index() { return std::distance(page_->records_.begin(), vec_iter); }
-
    public:
     using iterator_category = std::bidirectional_iterator_tag;
     using value_type = Record;
@@ -144,10 +143,22 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
       return *this;
     }
 
+    Iterator operator++(int) {
+      Iterator tmp = *this;
+      ++(*this);
+      return tmp;
+    }
+
     Iterator& operator--() {
       --vec_iter;
       retreat_to_valid();
       return *this;
+    }
+
+    Iterator operator--(int) {
+      Iterator tmp = *this;
+      --(*this);
+      return tmp;
     }
 
     bool operator==(const Iterator& other) const { return page_ == other.page_ && vec_iter == other.vec_iter; }
@@ -157,6 +168,17 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     Record& operator*() { return *vec_iter; }
 
     Record* operator->() { return &(*vec_iter); }
+
+    bool operator<(const Iterator& other) const { return vec_iter < other.vec_iter; }
+    bool operator<=(const Iterator& other) const { return vec_iter <= other.vec_iter; }
+    bool operator>(const Iterator& other) const { return vec_iter > other.vec_iter; }
+    bool operator>=(const Iterator& other) const { return vec_iter >= other.vec_iter; }
+
+    difference_type operator-(const Iterator& other) const { return vec_iter - other.vec_iter; }
+    Iterator operator+(difference_type n) const { return Iterator(page_, vec_iter + n); }
+    Iterator operator-(difference_type n) const { return Iterator(page_, vec_iter - n); }
+
+    size_t index() { return std::distance(page_->records_.begin(), vec_iter); }
 
     vec_iter_type base() { return vec_iter; }
 
@@ -172,7 +194,27 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
   void flip_bit(Iterator it) { flip_bit(it.base()); }
 
-  void set_bit(Iterator it) { set_bit(it.base()); }
+  void set_bit(Iterator it, bool value) { set_bit(it.base(), value); }
+
+  const void* get_data(const KeyOrRecord key_or_record) {
+    if (std::holds_alternative<Record>(key_or_record)) {
+      const Record& record = std::get<Record>(key_or_record);
+      return static_cast<const void*>(record.data());
+    } else { // std::holds_alternative<Key>(key_or_record)
+      const Key& key = std::get<Key>(key_or_record);
+      return static_cast<const void*>(key.data());
+    }
+  }
+
+  size_t get_size(const KeyOrRecord key_or_record) {
+    if (std::holds_alternative<Record>(key_or_record)) {
+      const Record& record = std::get<Record>(key_or_record);
+      return record.size();
+    } else { // std::holds_alternative<Key>(key_or_record)
+      const Key& key = std::get<Key>(key_or_record);
+      return key.size();
+    }
+  }
 
  public:
   bool validate(Iterator it) { return get_bit(it) == true; }
@@ -181,7 +223,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   Iterator search_lb(const KeyOrRecord& key_or_record) {
     if (bitmap_.count() == 0) return end();
     size_t left = find_first_occupied(0);  // inclusive
-    if (std::memcmp(key_or_record.data(), records_.at(left).data(), key_or_record.size()) == 0)
+    if (std::memcmp(get_data(key_or_record), records_.at(left).data(), get_size(key_or_record)) == 0)
       return Iterator(this, left);  // Early return helps guarantee left is smaller
 
     size_t right = find_first_occupied(RECORD_COUNT) + 1;  // exclusive
@@ -190,7 +232,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     {
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
       auto record_mid = get_record(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
-      int ret = std::memcmp(key_or_record.data(), record_mid.data(), key_or_record.size());
+      int ret = std::memcmp(get_data(key_or_record), record_mid.data(), get_size(key_or_record));
       if (ret < 0)  // lb is less than mid
         right = mid;
       else if (ret == 0)  // lb is less than or equal to mid
@@ -216,7 +258,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     {
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
       auto record_mid = get_record(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
-      int ret = std::memcmp(key_or_record.data(), record_mid.data(), key_or_record.size());
+      int ret = std::memcmp(get_data(key_or_record), record_mid.data(), get_size(key_or_record));
       if (ret < 0)  // ub is less than or equal to mid
         right = mid + 1;
       else if (ret >= 0)  // ub is greater than mid
@@ -230,7 +272,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     auto lb = search_lb(key_or_record);
     if (lb == end()) return std::nullopt;
     auto record_lb = *lb;
-    if (std::memcmp(key_or_record.data(), record_lb.data(), key_or_record.size()) == 0)
+    if (std::memcmp(get_data(key_or_record), record_lb.data(), get_size(key_or_record)) == 0)
       return lb;
     else
       return std::nullopt;
@@ -256,7 +298,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     // page is full, split to be managed by page owner
     Iterator ub = search_ub(record);
     if (!allow_dup) {
-      for (Iterator it = ub - 1; it < end(); --it) {
+      for (Iterator it = ub; it < end(); --it) {
         if (get_bit(it) == true) {
           if (std::equal(record.begin(), record.end(), (*it).begin()))
             return {it++, false};  // It should have been inserted here, but cannot because of duplicate ahead of it.
@@ -266,7 +308,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     }
 
     if (get_bit(ub) == 0) {
-      (*ub).swap(record);
+      (*ub).swap(const_cast<Record&>(record));
       flip_bit(ub);
       return {ub, true};
     }

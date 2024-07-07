@@ -63,7 +63,6 @@ else()
     message(STATUS "OS VERSION ${CMAKE_SYSTEM_VERSION}")
 endif()
 
-
 add_library(BTree INTERFACE
     include/fc/comp.h 
     include/fc/disk_fixed_alloc.h 
@@ -74,14 +73,26 @@ add_library(BTree INTERFACE
     include/fc/mmfile_nix.h
     include/fc/details.h)
 
+add_library(DBBTree INTERFACE
+    include/db/db_btree.h
+    include/db/datapage.h)
+
 target_include_directories(
     BTree
     INTERFACE
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"  
-    )
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+)
+
+target_include_directories(
+    DBBTree
+    INTERFACE
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+)
 
 add_library(BTree::BTree ALIAS BTree)
+add_library(BTree::DBBTree ALIAS DBBTree)
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR FORCE_PREFER_BINARY_SEARCH)
     add_definitions(-DFC_PREFER_BINARY_SEARCH=1)
@@ -89,7 +100,7 @@ endif()
 
 if (FORCE_USE_SIMD)
     add_definitions(-DFC_USE_SIMD=1)
-endif ()
+endif()
 
 add_executable(fc_tests
     test/test_statistics.h
@@ -97,9 +108,23 @@ add_executable(fc_tests
     test/fc_catch2.h
     test/unittest.cpp
     test/rwtest.cpp
+)
+
+add_executable(fc_benchmarks
+    test/test_statistics.h
+    test/test_statistics.cpp
+    test/fc_catch2.h
     test/perftest.cpp
     test/perftest_no_simd.cpp
-    test/perftest_string.cpp)
+    test/perftest_string.cpp
+)
+
+add_executable(db_tests
+    test/test_statistics.h
+    test/test_statistics.cpp
+    test/fc_catch2.h
+    test/test_fixed_page.cpp
+)
 
 if (${Catch_VER} EQUAL 2)
     message(STATUS "Used old target for catch2")
@@ -107,13 +132,22 @@ if (${Catch_VER} EQUAL 2)
         set(CATCH_LIBS_ALIASES Catch2::Catch2)
     endif()
     target_compile_definitions(fc_tests PRIVATE CATCH2_OLD)
+    target_compile_definitions(fc_benchmarks PRIVATE CATCH2_OLD)
+    target_compile_definitions(db_tests PRIVATE CATCH2_OLD)
 endif()
 
 target_include_directories(fc_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(fc_benchmarks PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_include_directories(db_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+
 target_link_libraries(fc_tests PRIVATE ${CATCH_LIBS_ALIASES} BTree::BTree)
+target_link_libraries(fc_benchmarks PRIVATE ${CATCH_LIBS_ALIASES} BTree::BTree)
+target_link_libraries(db_tests PRIVATE ${CATCH_LIBS_ALIASES} BTree::BTree BTree::DBBTree)
 
 if(MSVC)
     target_compile_options(fc_tests PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
+    target_compile_options(fc_benchmarks PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
+    target_compile_options(db_tests PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
     set(CMAKE_C_FLAGS_RELEASE "/Ox")
     set(CMAKE_CXX_FLAGS_RELEASE "/Ox")
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/Ox")
@@ -123,20 +157,32 @@ else()
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3")
     if (FORCE_USE_SIMD)
         target_compile_options(fc_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
+        target_compile_options(fc_benchmarks PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
+        target_compile_options(db_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
     else ()
         target_compile_options(fc_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
+        target_compile_options(fc_benchmarks PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
+        target_compile_options(db_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
     endif ()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS_EQUAL 14.0.3.14030022)
         target_link_options(fc_tests PRIVATE -fexperimental-library)
+        target_link_options(fc_benchmarks PRIVATE -fexperimental-library)
+        target_link_options(db_tests PRIVATE -fexperimental-library)
     endif()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS_EQUAL 14)
         target_link_options(fc_tests PRIVATE -fexperimental-library)
+        target_link_options(fc_benchmarks PRIVATE -fexperimental-library)
+        target_link_options(db_tests PRIVATE -fexperimental-library)
     endif()
 endif()
 
 include(CTest)
 include(Catch)
 catch_discover_tests(fc_tests
+    EXTRA_ARGS --benchmark-samples=1)
+catch_discover_tests(fc_benchmarks
+    EXTRA_ARGS --benchmark-samples=1)
+catch_discover_tests(db_tests
     EXTRA_ARGS --benchmark-samples=1)
 
 set(CPACK_SOURCE_IGNORE_FILES
@@ -164,35 +210,41 @@ set(CPACK_SOURCE_IGNORE_FILES
 include(GNUInstallDirs)
 
 install(
-    TARGETS BTree
+    TARGETS BTree DBBTree
     EXPORT BTree_Targets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
 
 include(CMakePackageConfigHelpers)
 write_basic_package_version_file(
     "BTreeConfigVersion.cmake"
     VERSION ${MAJOR}.${MINOR}.${PATCH}
-    COMPATIBILITY SameMajorVersion)
+    COMPATIBILITY SameMajorVersion
+)
 
 configure_package_config_file(
     "${PROJECT_SOURCE_DIR}/cmake/BTreeConfig.cmake.in"
     "${PROJECT_BINARY_DIR}/BTreeConfig.cmake"
-    INSTALL_DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/BTree/cmake)
+    INSTALL_DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/BTree/cmake
+)
 
 install(
     EXPORT BTree_Targets
     FILE BTreeTargets.cmake
     NAMESPACE BTree::
-    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/BTree/cmake)
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/BTree/cmake
+)
 
 install(FILES "${PROJECT_BINARY_DIR}/BTreeConfig.cmake"
     "${PROJECT_BINARY_DIR}/BTreeConfigVersion.cmake"
-    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/BTree/cmake)
+    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/BTree/cmake
+)
 
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/fc
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
 
 set(CPACK_PACKAGE_NAME "BTree")
 set(CPACK_PACKAGE_VERSION "${MAJOR}.${MINOR}.${PATCH}")

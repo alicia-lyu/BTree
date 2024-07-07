@@ -1,4 +1,4 @@
-#include "db/DataPage.h"
+#include "db/datapage.h"
 #include "fc_catch2.h"
 
 using MMapFile = frozenca::MemoryMappedFileImpl;
@@ -10,7 +10,7 @@ constexpr size_t KEY_SIZE = 16;
 using TestPage = FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>;
 
 TEST_CASE("FixedRecordDataPage basic operations", "[DataPage]") {
-  MMapFile mmap_file("/temp/test_fixed_page");
+  MMapFile mmap_file("./Testing/Temporary/mmap.tmp", PAGE_SIZE * 2, true);
 
   SECTION("Insert and retrieve records") {
     TestPage page(mmap_file, 0);
