@@ -1,6 +1,7 @@
 #ifndef __FC_BTREE_H__
 #define __FC_BTREE_H__
 
+#include <cstddef>
 #ifndef FC_USE_SIMD
 #define FC_USE_SIMD 0
 #endif // FC_USE_SIMD
@@ -17,7 +18,6 @@
 #endif // FC_USE_SIMD
 
 #include "fc/details.h"
-#include "db/datapage.h"
 #include <algorithm>
 #include <bit>
 #include <array>
@@ -191,7 +191,7 @@ requires(Fanout >= 2) class BTreeBase {
                                    std::unique_ptr<Node>>>
         children_;
     
-    std::vector<DataPage&> leaves_ = {}; // Should only have elements when children_ is empty
+    std::vector<size_t> leaves_ = {}; // Should only have elements when children_ is empty
 
     Node() { keys_.reserve(disk_max_nkeys); }
 
