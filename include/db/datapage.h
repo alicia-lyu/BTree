@@ -50,19 +50,20 @@ class DataPage {
 
 template <size_t PAGE_SIZE, size_t RECORD_SIZE, size_t KEY_SIZE>
 class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
+ public:
   static constexpr size_t RECORD_COUNT = PAGE_SIZE / RECORD_SIZE;
   static constexpr size_t DATA_SIZE = PAGE_SIZE - RECORD_COUNT / 8 - sizeof(uintmax_t);
-
- public:
   using Record = std::array<unsigned char, RECORD_SIZE>;
   using Key = std::array<unsigned char, KEY_SIZE>;
   using KeyOrRecord = std::variant<Record, Key>;
   using vec_iter_type = std::vector<Record>::iterator;
   using typename DataPage<PAGE_SIZE>::MMapFile;
 
+ protected:
   std::bitset<RECORD_COUNT> bitmap_;  // 0 for free, 1 for occupied
   std::vector<Record> records_;
 
+ public:
   // New constructor to use memory-mapped file directly
   FixedRecordDataPage(MMapFile& mmap_file, uintmax_t file_offset)
       : bitmap_(*new(get_mmap_ptr(mmap_file, file_offset)) std::bitset<RECORD_COUNT>),
@@ -78,6 +79,9 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     // un-schematize but deallocation is deferred to mmap
   }
 
+  size_t size() { return bitmap_.count(); }
+
+ protected:
   Record& get_record(size_t index) { return records_.at(index); }
 
   Key get_key(size_t index) {
@@ -103,10 +107,12 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
   void set_bit(vec_iter_type rec_it, bool value = true) { bitmap_.set(std::distance(records_.begin(), rec_it), value); }
 
-  class Iterator : public std::iterator<std::bidirectional_iterator_tag, Record> {
+ public:
+  class Iterator {
     FixedRecordDataPage* page_;
     vec_iter_type vec_iter;
 
+    // An iter exposed to external world always valid unless reaches end
     void advance_to_valid() {
       while (vec_iter < page_->records_.end() && !page_->bitmap_[index()]) {
         ++vec_iter;
@@ -122,6 +128,12 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     size_t index() { return std::distance(page_->records_.begin(), vec_iter); }
 
    public:
+    using iterator_category = std::bidirectional_iterator_tag;
+    using value_type = Record;
+    using difference_type = vec_iter_type::difference_type;
+    using pointer = Record*;
+    using reference = Record&;
+
     Iterator(FixedRecordDataPage* page, size_t index) : page_(page), vec_iter(page->records_.begin() + index) { advance_to_valid(); }
 
     Iterator(FixedRecordDataPage* page, vec_iter_type vec_iter) : page_(page), vec_iter(vec_iter) { advance_to_valid(); }
@@ -155,11 +167,15 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
   Iterator end() { return Iterator(this, records_.end()); }
 
+ protected:
   bool get_bit(Iterator it) { return get_bit(it.base()); }
 
   void flip_bit(Iterator it) { flip_bit(it.base()); }
 
   void set_bit(Iterator it) { set_bit(it.base()); }
+
+ public:
+  bool validate(Iterator it) { return get_bit(it) == true; }
 
   // LATER: Migrate to SIMD (How to handle bitmap jumps?)
   Iterator search_lb(const KeyOrRecord& key_or_record) {
@@ -207,7 +223,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
         left = mid + 1;
     }
     // ub is guaranteed to be not equal, regardless of whether a match exists.
-    return Iterator(this, left);
+    return Iterator(this, left);  // Will advance to valid---the one entry between [left, right]
   }
 
   std::optional<Iterator> search(const KeyOrRecord& key_or_record) {
@@ -234,14 +250,25 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     return RECORD_COUNT;
   }
 
-  std::optional<Iterator> insert(const Record& record) {
-    if (bitmap_.count() == RECORD_COUNT) return std::nullopt;
+  //
+  std::pair<Iterator, bool> insert(const Record& record, bool allow_dup = true) {
+    if (bitmap_.count() == RECORD_COUNT) return {Iterator(this, RECORD_COUNT), false};
     // page is full, split to be managed by page owner
-    auto ub = search_ub(record);
+    Iterator ub = search_ub(record);
+    if (!allow_dup) {
+      for (Iterator it = ub - 1; it < end(); --it) {
+        if (get_bit(it) == true) {
+          if (std::equal(record.begin(), record.end(), (*it).begin()))
+            return {it++, false};  // It should have been inserted here, but cannot because of duplicate ahead of it.
+          break;
+        }
+      }
+    }
+
     if (get_bit(ub) == 0) {
       (*ub).swap(record);
       flip_bit(ub);
-      return ub;
+      return {ub, true};
     }
     // Moving elements is inevitable
     records_.insert(ub.base(), record);  // temporarily grows larger than DATA_SIZE
@@ -272,7 +299,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
       // leaving an empty seat at ub, which should be set to true
       set_bit(ub, true);
     }
-    return ub;
+    return {ub, true};
   }
 
   // No element shifting, which only happens at insertions
@@ -294,6 +321,8 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   }
 
   // Returns the key to copy up and insert into the tree
+  // Operate on the assumption that a datapage is (almost) full when it must split, DERERRED to caller to ensure that
+  // Otherwise, unexpected behavior when the bitmap is skewed.
   Key split_with(FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>& right_sibling) {
     assert(right_sibling.bitmap_.none());
     size_t mid = find_first_occupied(RECORD_COUNT / 2);

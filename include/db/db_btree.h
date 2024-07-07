@@ -134,7 +134,6 @@ class FixedDBBTree {
       inserted_it = ret.first;
     }
     auto inserted_node = *inserted_it;
-    
   }
 
  private:
