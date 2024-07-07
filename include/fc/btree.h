@@ -107,19 +107,19 @@ template <typename V> struct ProjectionIter {
 };
 
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class Alloc, bool SeparateDataPage>
+          bool AllowDup, template <typename T> class Alloc>
 requires(Fanout >= 2) class BTreeBase;
 
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class AllocTemplate, bool SeparateDataPage>
+          bool AllowDup, template <typename T> class AllocTemplate>
 struct join_helper;
 
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class AllocTemplate, typename T, bool SeparateDataPage>
+          bool AllowDup, template <typename T> class AllocTemplate, typename T>
 struct split_helper;
 
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class AllocTemplate, bool SeparateDataPage>
+          bool AllowDup, template <typename T> class AllocTemplate>
 requires(Fanout >= 2) class BTreeBase {
 
   struct Node;
@@ -187,10 +187,11 @@ requires(Fanout >= 2) class BTreeBase {
     attr_t height_ = 0;
     attr_t num_keys_ =
         0; // number of keys in this node, used only for disk variant
-    std::vector<std::conditional_t<is_disk_, std::unique_ptr<Node, Deleter>, std::unique_ptr<Node>>>
+    std::vector<std::conditional_t<is_disk_, std::unique_ptr<Node, Deleter>,
+                                   std::unique_ptr<Node>>>
         children_;
     
-    std::array<size_t, disk_max_nkeys + 1> leaves_ = {}; // Data page index
+    std::vector<DataPage&> leaves_ = {}; // Should only have elements when children_ is empty
 
     Node() { keys_.reserve(disk_max_nkeys); }
 
@@ -501,15 +502,6 @@ public:
            (std::ssize(node->children_) >= Fanout &&
             std::ssize(node->children_) == node->nkeys() + 1 &&
             std::ssize(node->children_) <= 2 * Fanout));
-    
-    // NEW invariant for leaf nodes with separate data pages
-    assert(!SeparateDataPage || 
-    (!node->is_leaf() && node->leaves_.empty()) ||
-    (node->is_leaf() &&
-    (
-      std::ssize(node->leaves_) >= Fanout &&
-      std::ssize(node->leaves_) == node->nkeys() + 1 &&
-      std::ssize(node->leaves_) <= 2 * Fanout)));
 
     // index check
     assert(!node->parent_ ||
@@ -541,7 +533,7 @@ public:
       assert(node->height_ == node->children_.back()->height_ + 1);
       num_keys += node->children_.back()->size_;
       assert(node->size_ == num_keys);
-    } else { // Key range key on leaves DEFERRED to DBBTree
+    } else {
       assert(node->size_ == node->nkeys());
       assert(node->height_ == 0);
     }
@@ -969,7 +961,7 @@ protected:
         // before climbing, if the lower bound is a key not in the leaf node, 
         // it points to the end() of the largest leaf node that's smaller than key (leaf node lower bound)
         if (climb) {
-          it.climb();
+          it.climb(); //
         }
         return it;
       } else {
@@ -1201,7 +1193,7 @@ protected:
   template <typename T>
   iterator_type
   insert_leaf(Node *node, attr_t i,
-              T &&value) requires std::is_same_v<std::remove_cvref_t<T>, V> { // Insert page index as well
+              T &&value) requires std::is_same_v<std::remove_cvref_t<T>, V> {
     assert(node && node->is_leaf() && !node->is_full());
     bool update_begin = (empty() || Comp{}(Proj{}(value), Proj{}(*begin_)));
 
@@ -1275,7 +1267,7 @@ protected:
     }
   }
 
-  iterator_type erase_leaf(Node *node, attr_t i) { // Need to additionally handle leaves_
+  iterator_type erase_leaf(Node *node, attr_t i) {
     assert(node && i >= 0 && i < node->nkeys() && node->is_leaf() &&
            !node->has_minimal_keys());
     bool update_begin = (begin_ == const_iterator_type(node, i));
@@ -1929,7 +1921,8 @@ protected:
   }
 
 public:
-  template <Containable K_, typename V_, attr_t Fanout_, typename Comp_, bool AllowDup_, template <typename T> class AllocTemplate_, bool SeparateDataPage_>
+  template <Containable K_, typename V_, attr_t Fanout_, typename Comp_,
+            bool AllowDup_, template <typename T> class AllocTemplate_>
   friend struct join_helper;
 
 protected:
@@ -2083,24 +2076,25 @@ protected:
   }
 
 public:
-    template <Containable K_, typename V_, attr_t Fanout_, typename Comp_, bool AllowDup_, template <typename T> class AllocTemplate_, typename T, bool SeparateDataPage_>
+    template <Containable K_, typename V_, attr_t Fanout_, typename Comp_,
+              bool AllowDup_, template <typename T> class AllocTemplate_, typename T>
     friend struct split_helper;
 };
 
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class AllocTemplate, bool SeparateDataPage>
+          bool AllowDup, template <typename T> class AllocTemplate>
 struct join_helper {
 private:
-    BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> result_;
+    BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> result_;
 
-    using Tree = BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>;
+    using Tree = BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>;
     using Node = typename Tree::node_type;
     using Proj = typename Tree::Proj;
     static constexpr bool is_disk_ = Tree::is_disk_;
 
 public:
-  join_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree_left,
-              BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree_right) {
+  join_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_left,
+              BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_right) {
     if (tree_left.empty()) {
       result_ = std::move(tree_right);
     } else if (tree_right.empty()) {
@@ -2116,9 +2110,9 @@ public:
 
   template <typename T_>
   requires std::is_constructible_v<V, std::remove_cvref_t<T_>>
-  join_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree_left,
+  join_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_left,
               T_                                                     &&raw_value,
-              BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree_right)  {
+              BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_right)  {
 
   V mid_value{std::forward<T_>(raw_value)};
   if ((!tree_left.empty() &&
@@ -2277,18 +2271,18 @@ public:
     result_ = std::move(new_tree);
   }
 }
-  BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>&& result() { return std::move(result_); }
+  BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>&& result() { return std::move(result_); }
 };
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class AllocTemplate, typename T, bool SeparateDataPage>
+          bool AllowDup, template <typename T> class AllocTemplate, typename T>
 struct split_helper {
 private:
-  std::pair<BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>,
-            BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>> result_;
+  std::pair<BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>,
+            BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>> result_;
 public:
-  using Tree = BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>;
+  using Tree = BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>;
 
-  split_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree,
+  split_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree,
                T                                                      &&raw_key)
       requires(std::is_constructible_v<K, std::remove_cvref_t<T>>) {
     if (tree.empty()) {
@@ -2301,7 +2295,7 @@ public:
                                         tree.find_upper_bound(mid_key, false));
     }
   }
-  split_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree,
+  split_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree,
                T                                                      &&raw_key1,
                T                                                      &&raw_key2)
       requires(std::is_constructible_v<K, std::remove_cvref_t<T>>) {
@@ -2319,60 +2313,59 @@ public:
                                         tree.find_upper_bound(key2, false));
     }
   }
-  std::pair<BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>,
-            BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>> &&
+  std::pair<BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>,
+            BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>> &&
   result() { return std::move(result_); }
 
 };
 template <Containable K, attr_t t = 64, typename Comp = std::ranges::less,
-          template <typename T> class AllocTemplate = std::allocator, bool SeparateDataPage = false>
-using BTreeSet = BTreeBase<K, K, t, Comp, false, AllocTemplate, SeparateDataPage>;
+          template <typename T> class AllocTemplate = std::allocator>
+using BTreeSet = BTreeBase<K, K, t, Comp, false, AllocTemplate>;
 
 template <Containable K, attr_t t = 64, typename Comp = std::ranges::less,
-          template <typename T> class AllocTemplate = std::allocator, bool SeparateDataPage = false>
-using BTreeMultiSet = BTreeBase<K, K, t, Comp, true, AllocTemplate, SeparateDataPage>;
+          template <typename T> class AllocTemplate = std::allocator>
+using BTreeMultiSet = BTreeBase<K, K, t, Comp, true, AllocTemplate>;
 
 template <Containable K, Containable V, attr_t t = 64,
           typename Comp = std::ranges::less,
-          template <typename T> class AllocTemplate = std::allocator, bool SeparateDataPage = false>
-using BTreeMap = BTreeBase<K, BTreePair<K, V>, t, Comp, false, AllocTemplate, SeparateDataPage>;
+          template <typename T> class AllocTemplate = std::allocator>
+using BTreeMap = BTreeBase<K, BTreePair<K, V>, t, Comp, false, AllocTemplate>;
 
 template <Containable K, Containable V, attr_t t = 64,
           typename Comp = std::ranges::less,
-          template <typename T> class AllocTemplate = std::allocator,
-          bool SeparateDataPage = false>
+          template <typename T> class AllocTemplate = std::allocator>
 using BTreeMultiMap =
-    BTreeBase<K, BTreePair<K, V>, t, Comp, true, AllocTemplate, SeparateDataPage>;
+    BTreeBase<K, BTreePair<K, V>, t, Comp, true, AllocTemplate>;
 
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class AllocTemplate, bool SeparateDataPage = false>
-BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> join(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree_left,
-                                                            BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree_right) {
+          bool AllowDup, template <typename T> class AllocTemplate>
+BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> join(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_left,
+                                                            BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_right) {
   return join_helper(std::move(tree_left), std::move(tree_right)).result();
 }
 
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class AllocTemplate, typename T_, bool SeparateDataPage = false>
-BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> join(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree_left,
+          bool AllowDup, template <typename T> class AllocTemplate, typename T_>
+BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> join(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_left,
                                                             T_                                                     &&raw_value,
-                                                            BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree_right) {
+                                                            BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_right) {
   return join_helper(std::move(tree_left), std::move(raw_value), std::move(tree_right)).result();
 }
 
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class AllocTemplate, typename T, bool SeparateDataPage>
-std::pair<BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>,
-          BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>>
-split(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree,
+          bool AllowDup, template <typename T> class AllocTemplate, typename T>
+std::pair<BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>,
+          BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>>
+split(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree,
       T                                                      &&raw_key) {
   return split_helper(std::move(tree), std::move(raw_key)).result();
 }
 
 template <Containable K, typename V, attr_t Fanout, typename Comp,
-          bool AllowDup, template <typename T> class AllocTemplate, typename T, bool SeparateDataPage>
-std::pair<BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>,
-          BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage>>
-split(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate, SeparateDataPage> &&tree,
+          bool AllowDup, template <typename T> class AllocTemplate, typename T>
+std::pair<BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>,
+          BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate>>
+split(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree,
       T                                                      &&raw_key1,
       T                                                      &&raw_key2) {
   return split_helper(std::move(tree), std::move(raw_key1), std::move(raw_key2)).result();
