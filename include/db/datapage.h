@@ -41,11 +41,11 @@ template <size_t PAGE_SIZE>
 class DataPage {
  protected:
   using MMapFile = frozenca::MemoryMappedFileImpl;
-  uintmax_t next_page_offset;
+  uintmax_t next_page_offset_;
 
-  DataPage(MMapFile& mmap_file, uintmax_t file_offset) : next_page_offset(std::bit_cast<uintmax_t>(get_mmap_ptr(mmap_file, file_offset))) {}
+  DataPage(MMapFile& mmap_file, uintmax_t file_offset) : next_page_offset_(std::bit_cast<uintmax_t>(get_mmap_ptr(mmap_file, file_offset))) {}
 
-  DataPage() : next_page_offset(0) {}
+  DataPage() : next_page_offset_(0) {}
 
   virtual ~DataPage() {}
 
@@ -66,7 +66,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
  protected:
   std::bitset<RECORD_COUNT>* bitmap_;  // 0 for free, 1 for occupied
-  std::vector<Record>* records_;
+  std::vector<Record>* records_; // TODO: Change to an array of bytes.
 
  public:
   static std::string record_to_string(const Record& record) { return std::string(record.begin(), record.end()); }
