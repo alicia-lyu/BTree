@@ -2,13 +2,17 @@
 #define DATAPAGE_H
 
 #include <stddef.h>
+#include <sys/types.h>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 #include <bitset>
 #include <optional>
 #include <cstring>
 #include <iterator>
 #include <cassert>
+#include <iostream>
 
 #include "fc/mmfile_nix.h"
 
@@ -37,11 +41,13 @@ template <size_t PAGE_SIZE>
 class DataPage {
  protected:
   using MMapFile = frozenca::MemoryMappedFileImpl;
-  uintmax_t next_page_offset = 0;
+  uintmax_t next_page_offset;
 
   DataPage(MMapFile& mmap_file, uintmax_t file_offset) : next_page_offset(std::bit_cast<uintmax_t>(get_mmap_ptr(mmap_file, file_offset))) {}
 
-  virtual ~DataPage() = default;
+  DataPage() : next_page_offset(0) {}
+
+  virtual ~DataPage() {}
 
   void* get_mmap_ptr(MMapFile& mmap_file, uintmax_t file_offset, std::size_t offset = 0) {
     return reinterpret_cast<void*>(static_cast<unsigned char*>(mmap_file.get_page_ptr(file_offset, PAGE_SIZE)) + offset + sizeof(uintmax_t));
@@ -51,8 +57,7 @@ class DataPage {
 template <size_t PAGE_SIZE, size_t RECORD_SIZE, size_t KEY_SIZE>
 class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
  public:
-  static constexpr size_t RECORD_COUNT = PAGE_SIZE / RECORD_SIZE;
-  static constexpr size_t DATA_SIZE = PAGE_SIZE - RECORD_COUNT / 8 - sizeof(uintmax_t);
+  static constexpr size_t RECORD_COUNT = (PAGE_SIZE - sizeof(uintmax_t)) / (RECORD_SIZE + 1 / 8);
   using Record = std::array<unsigned char, RECORD_SIZE>;
   using Key = std::array<unsigned char, KEY_SIZE>;
   using KeyOrRecord = std::variant<Record, Key>;
@@ -60,30 +65,28 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   using typename DataPage<PAGE_SIZE>::MMapFile;
 
  protected:
-  std::bitset<RECORD_COUNT> bitmap_;  // 0 for free, 1 for occupied
-  std::vector<Record> records_;
+  std::bitset<RECORD_COUNT>* bitmap_;  // 0 for free, 1 for occupied
+  std::vector<Record>* records_;
 
  public:
   // New constructor to use memory-mapped file directly
   FixedRecordDataPage(MMapFile& mmap_file, uintmax_t file_offset)
       : DataPage<PAGE_SIZE>(mmap_file, file_offset),
-        bitmap_(*new(this->get_mmap_ptr(mmap_file, file_offset)) std::bitset<RECORD_COUNT>),
-        records_(*new(this->get_mmap_ptr(mmap_file, file_offset, sizeof(std::bitset<RECORD_COUNT>))) std::vector<Record>(RECORD_COUNT)) {
+        bitmap_(new(this->get_mmap_ptr(mmap_file, file_offset)) std::bitset<RECORD_COUNT>()),
+        records_(new(this->get_mmap_ptr(mmap_file, file_offset, sizeof(std::bitset<RECORD_COUNT>))) std::vector<Record>(RECORD_COUNT)) {
     assert(file_offset % PAGE_SIZE == 0);
+    std::cout << "FixedRecordDataPage constructed at " << file_offset << ". Page size: " << PAGE_SIZE << ". Record size: " << RECORD_SIZE
+              << ". Key size: " << KEY_SIZE << ". Record count: " << RECORD_COUNT << "\n";
   }
 
-  FixedRecordDataPage() { records_.reserve(RECORD_COUNT); }
+  FixedRecordDataPage() : bitmap_(std::make_unique<std::bitset<RECORD_COUNT>>()), records_(std::make_unique<std::vector<Record>>(RECORD_COUNT)) {}
 
-  ~FixedRecordDataPage() {
-    bitmap_.~bitset();
-    records_.~vector();
-    // un-schematize but deallocation is deferred to mmap
-  }
+  ~FixedRecordDataPage() {}
 
-  size_t size() { return bitmap_.count(); }
+  size_t size() { return bitmap_->count(); }
 
  protected:
-  Record& get_record(size_t index) { return records_.at(index); }
+  Record& get_record(size_t index) { return records_->at(index); }
 
   Key get_key(size_t index) {
     auto record = get_record(index);
@@ -95,18 +98,26 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   size_t get_occupancy_in_range(size_t left, size_t right) {
     size_t occupied = 0;
     for (size_t i = left; i < right; ++i) {
-      if (bitmap_[i]) {
+      if ((*bitmap_)[i]) {
         ++occupied;
       }
     }
     return occupied;
   }
 
-  bool get_bit(vec_iter_type rec_it) { return bitmap_[std::distance(records_.begin(), rec_it)]; }
+  bool get_bit(vec_iter_type rec_it) { return (*bitmap_)[std::distance(records_->begin(), rec_it)]; }
 
-  void flip_bit(vec_iter_type rec_it) { bitmap_.flip(std::distance(records_.begin(), rec_it)); }
+  void flip_bit(vec_iter_type rec_it) {
+    try {
+      bitmap_->flip(std::distance(records_->begin(), rec_it));
+    } catch (std::exception& e) {
+      std::cout << "Bit map size " << bitmap_->size() << ", count " << bitmap_->count() << " distance " << std::distance(records_->begin(), rec_it)
+                << std::endl;
+      throw e;
+    }
+  }
 
-  void set_bit(vec_iter_type rec_it, bool value = true) { bitmap_.set(std::distance(records_.begin(), rec_it), value); }
+  void set_bit(vec_iter_type rec_it, bool value = true) { bitmap_->set(std::distance(records_->begin(), rec_it), value); }
 
  public:
   class Iterator {
@@ -115,13 +126,13 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
     // An iter exposed to external world always valid unless reaches end
     void advance_to_valid() {
-      while (vec_iter < page_->records_.end() && !page_->bitmap_[index()]) {
+      while (vec_iter < page_->records_->end() && !(*page_->bitmap_)[index()]) {
         ++vec_iter;
       }
     }
 
     void retreat_to_valid() {
-      while (vec_iter >= page_->records_.begin() && !page_->bitmap_[index()]) {
+      while (vec_iter >= page_->records_->begin() && !(*page_->bitmap_)[index()]) {
         --vec_iter;
       }
     }
@@ -133,9 +144,9 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     using pointer = Record*;
     using reference = Record&;
 
-    Iterator(FixedRecordDataPage* page, size_t index) : page_(page), vec_iter(page->records_.begin() + index) { advance_to_valid(); }
+    Iterator(FixedRecordDataPage* page, size_t index) : page_(page), vec_iter(page->records_->begin() + index) {}
 
-    Iterator(FixedRecordDataPage* page, vec_iter_type vec_iter) : page_(page), vec_iter(vec_iter) { advance_to_valid(); }
+    Iterator(FixedRecordDataPage* page, vec_iter_type vec_iter) : page_(page), vec_iter(vec_iter) {}
 
     Iterator& operator++() {
       ++vec_iter;
@@ -178,16 +189,16 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     Iterator operator+(difference_type n) const { return Iterator(page_, vec_iter + n); }
     Iterator operator-(difference_type n) const { return Iterator(page_, vec_iter - n); }
 
-    size_t index() { return std::distance(page_->records_.begin(), vec_iter); }
+    size_t index() { return std::distance(page_->records_->begin(), vec_iter); }
 
     vec_iter_type base() { return vec_iter; }
 
     FixedRecordDataPage* get_page() { return page_; }
   };
 
-  Iterator begin() { return Iterator(this, records_.begin()); }
+  Iterator begin() { return Iterator(this, records_->begin()); }
 
-  Iterator end() { return Iterator(this, records_.end()); }
+  Iterator end() { return Iterator(this, records_->end()); }
 
  protected:
   bool get_bit(Iterator it) { return get_bit(it.base()); }
@@ -200,7 +211,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     if (std::holds_alternative<Record>(key_or_record)) {
       const Record& record = std::get<Record>(key_or_record);
       return static_cast<const void*>(record.data());
-    } else { // std::holds_alternative<Key>(key_or_record)
+    } else {  // std::holds_alternative<Key>(key_or_record)
       const Key& key = std::get<Key>(key_or_record);
       return static_cast<const void*>(key.data());
     }
@@ -210,7 +221,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     if (std::holds_alternative<Record>(key_or_record)) {
       const Record& record = std::get<Record>(key_or_record);
       return record.size();
-    } else { // std::holds_alternative<Key>(key_or_record)
+    } else {  // std::holds_alternative<Key>(key_or_record)
       const Key& key = std::get<Key>(key_or_record);
       return key.size();
     }
@@ -220,17 +231,22 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   bool validate(Iterator it) { return get_bit(it) == true; }
 
   // LATER: Migrate to SIMD (How to handle bitmap jumps?)
-  Iterator search_lb(const KeyOrRecord& key_or_record) {
-    if (bitmap_.count() == 0) return end();
+  std::optional<Iterator> search_lb(const KeyOrRecord& key_or_record) {
+    if (bitmap_->count() == 0) return end();
     size_t left = find_first_occupied(0);  // inclusive
-    if (std::memcmp(get_data(key_or_record), records_.at(left).data(), get_size(key_or_record)) == 0)
-      return Iterator(this, left);  // Early return helps guarantee left is smaller
+    auto ret = std::memcmp(get_data(key_or_record), records_->at(left).data(), get_size(key_or_record));
+    if (ret == 0)
+      return Iterator(this, left);  // Early return helps guarantee left < key_or_record
+    else if (ret < 0)
+      return std::nullopt;  // key_or_record is less than the first element
 
     size_t right = find_first_occupied(RECORD_COUNT) + 1;  // exclusive
     // Note that left is guaranteed to be occupied, while right is not.
     while (get_occupancy_in_range(left, right) <= 1)  // lock in to one entry
     {
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
+      if (mid == RECORD_COUNT) // no valid records between [left, right)
+        return Iterator(this, left);
       auto record_mid = get_record(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
       int ret = std::memcmp(get_data(key_or_record), record_mid.data(), get_size(key_or_record));
       if (ret < 0)  // lb is less than mid
@@ -251,12 +267,14 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   }
 
   Iterator search_ub(const KeyOrRecord& key_or_record) {
-    if (bitmap_.count() == 0) return end();
-    size_t left = find_first_occupied(0);                  // inclusive
-    size_t right = find_first_occupied(RECORD_COUNT) + 1;  // exclusive
-    while (get_occupancy_in_range(left, right) <= 1)       // lock in to one entry
+    if (bitmap_->count() == 0) return begin();
+    size_t left = 0;              // inclusive
+    size_t right = RECORD_COUNT;  // exclusive
+    while (right - left <= 1)     // lock in to one entry
     {
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
+      if (mid == RECORD_COUNT) // no valid records between [left, right)
+        return Iterator(this, left);
       auto record_mid = get_record(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
       int ret = std::memcmp(get_data(key_or_record), record_mid.data(), get_size(key_or_record));
       if (ret < 0)  // ub is less than or equal to mid
@@ -265,13 +283,13 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
         left = mid + 1;
     }
     // ub is guaranteed to be not equal, regardless of whether a match exists.
-    return Iterator(this, left);  // Will advance to valid---the one entry between [left, right]
+    return Iterator(this, left);
   }
 
   std::optional<Iterator> search(const KeyOrRecord& key_or_record) {
     auto lb = search_lb(key_or_record);
-    if (lb == end()) return std::nullopt;
-    auto record_lb = *lb;
+    if (!lb.has_value()) return std::nullopt;
+    auto record_lb = *lb.value();
     if (std::memcmp(get_data(key_or_record), record_lb.data(), get_size(key_or_record)) == 0)
       return lb;
     else
@@ -284,8 +302,8 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     size_t to_left = index;
     size_t to_right = index;
     while (to_left >= lower_bound || to_right < upper_bound) {
-      if (to_left >= lower_bound && bitmap_[to_left] == 1) return to_left;
-      if (to_right < upper_bound && bitmap_[to_right] == 1) return to_right;
+      if (to_left >= lower_bound && (*bitmap_)[to_left] == 1) return to_left;
+      if (to_right < upper_bound && (*bitmap_)[to_right] == 1) return to_right;
       --to_left;
       ++to_right;
     }
@@ -294,7 +312,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
   //
   std::pair<Iterator, bool> insert(const Record& record, bool allow_dup = true) {
-    if (bitmap_.count() == RECORD_COUNT) return {Iterator(this, RECORD_COUNT), false};
+    if (bitmap_->count() == RECORD_COUNT) return {Iterator(this, RECORD_COUNT), false};
     // page is full, split to be managed by page owner
     Iterator ub = search_ub(record);
     if (!allow_dup) {
@@ -313,13 +331,13 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
       return {ub, true};
     }
     // Moving elements is inevitable
-    records_.insert(ub.base(), record);  // temporarily grows larger than DATA_SIZE
+    records_->insert(ub.base(), record);  // temporarily grows larger than DATA_SIZE
     // Erasing from the tail is more efficient
     bool before_ub = false;
-    auto records__it = records_.end();
-    while (records__it >= records_.begin()) {
+    auto records__it = records_->end();
+    while (records__it >= records_->begin()) {
       if (!get_bit(records__it)) {
-        records_.erase(records__it);
+        records_->erase(records__it);
         if (records__it < ub.base()) before_ub = true;
         break;
       }
@@ -346,9 +364,9 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
   // No element shifting, which only happens at insertions
   std::optional<Iterator> erase(size_t index) {
-    if (bitmap_[index]) {
+    if ((*bitmap_)[index]) {
       // will be cleaned when elements shift during insertions
-      bitmap_[index] = false;
+      (*bitmap_)[index] = false;
       return Iterator(this, index);
     }
     return std::nullopt;
@@ -366,14 +384,14 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   // Operate on the assumption that a datapage is (almost) full when it must split, DERERRED to caller to ensure that
   // Otherwise, unexpected behavior when the bitmap is skewed.
   Key split_with(FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>& right_sibling) {
-    assert(right_sibling.bitmap_.none());
+    assert(right_sibling.bitmap_->none());
     size_t mid = find_first_occupied(RECORD_COUNT / 2);
     size_t right_index = 0;
     for (size_t i = mid; i < RECORD_COUNT; ++i) {
-      if (bitmap_[i] == 1) {
-        right_sibling.records_.at(right_index).swap(records_.at(i));
-        bitmap_[i] = 0;
-        right_sibling.bitmap_[right_index] = 1;
+      if ((*bitmap_)[i] == 1) {
+        right_sibling.records_->at(right_index).swap(records_->at(i));
+        (*bitmap_)[i] = 0;
+        (*right_sibling.bitmap_)[right_index] = 1;
         ++right_index;
       }
     }
