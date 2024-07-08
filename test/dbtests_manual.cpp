@@ -58,7 +58,7 @@ int main() {
   while (ret) {
     char random_char = 'a' + rand() % 26;
     std::fill(record.begin(), record.end(), random_char);
-    std::cout << "Inserting record: " << record.data() << std::endl;
+    std::cout << "Inserting record: " << TestPage::record_to_string(record) << std::endl;
     std::tie(it, ret) = page.insert(record);
     if (ret) {
       inserted++;
@@ -68,6 +68,6 @@ int main() {
       assert(std::equal(record.begin(), record.end(), (*it).begin()));
     }
   }
-  page.verify_order();
+  assert(page.verify_order());
   assert(inserted == TestPage::RECORD_COUNT);
 }
