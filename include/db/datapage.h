@@ -105,7 +105,11 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     return occupied;
   }
 
-  bool get_bit(vec_iter_type rec_it) { return (*bitmap_)[std::distance(records_->begin(), rec_it)]; }
+  bool get_bit(vec_iter_type rec_it) {
+    auto rec_it_index = std::distance(records_->begin(), rec_it);
+    if (rec_it_index >= (long)RECORD_COUNT) throw std::out_of_range("Record iterator out of range");
+    return (*bitmap_)[rec_it_index];
+  }
 
   void flip_bit(vec_iter_type rec_it) {
     try {
@@ -117,7 +121,11 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     }
   }
 
-  void set_bit(vec_iter_type rec_it, bool value = true) { bitmap_->set(std::distance(records_->begin(), rec_it), value); }
+  void set_bit(vec_iter_type rec_it, bool value = true) {
+    auto rec_it_index = std::distance(records_->begin(), rec_it);
+    // std::cout << "Setting bit at index: " << rec_it_index << " to value: " << value << std::endl;
+    bitmap_->set(rec_it_index, value);
+  }
 
  public:
   class Iterator {
@@ -242,10 +250,10 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
     size_t right = find_first_occupied(RECORD_COUNT) + 1;  // exclusive
     // Note that left is guaranteed to be occupied, while right is not.
-    while (get_occupancy_in_range(left, right) <= 1)  // lock in to one entry
+    while (get_occupancy_in_range(left, right) > 1)  // lock in to one entry
     {
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
-      if (mid == RECORD_COUNT) // no valid records between [left, right)
+      if (mid == RECORD_COUNT)  // no valid records between [left, right)
         return Iterator(this, left);
       auto record_mid = get_record(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
       int ret = std::memcmp(get_data(key_or_record), record_mid.data(), get_size(key_or_record));
@@ -270,16 +278,29 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     if (bitmap_->count() == 0) return begin();
     size_t left = 0;              // inclusive
     size_t right = RECORD_COUNT;  // exclusive
-    while (right - left <= 1)     // lock in to one entry
+    while (right - left > 1)      // lock in to one entry
     {
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
-      if (mid == RECORD_COUNT) // no valid records between [left, right)
+      if (mid == RECORD_COUNT)  // no valid records between [left, right)
         return Iterator(this, left);
       auto record_mid = get_record(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
       int ret = std::memcmp(get_data(key_or_record), record_mid.data(), get_size(key_or_record));
-      if (ret < 0)  // ub is less than or equal to mid
+      if (ret < 0) {  // ub is less than or equal to mid
         right = mid + 1;
-      else if (ret >= 0)  // ub is greater than mid
+        // Only having `right = mid + 1` may enter into infinite loop, when right keeps being reset to left + 2
+        if (right - left == 2) {  // We must find out whether ub is equal to mid
+          if (bitmap_->test(left) == true) {
+            auto record_left = get_record(left);
+            if (std::memcmp(get_data(key_or_record), record_left.data(), get_size(key_or_record)) < 0) {  // ub is less than mid
+              right = mid;
+              continue;
+            }
+          }
+        }
+        // ub is equal to mid
+        left = mid;
+
+      } else if (ret >= 0)  // ub is greater than mid
         left = mid + 1;
     }
     // ub is guaranteed to be not equal, regardless of whether a match exists.
@@ -302,8 +323,8 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     size_t to_left = index;
     size_t to_right = index;
     while (to_left >= lower_bound || to_right < upper_bound) {
-      if (to_left >= lower_bound && (*bitmap_)[to_left] == 1) return to_left;
-      if (to_right < upper_bound && (*bitmap_)[to_right] == 1) return to_right;
+      if (to_left >= lower_bound && (*bitmap_)[to_left] == true) return to_left;
+      if (to_right < upper_bound && (*bitmap_)[to_right] == true) return to_right;
       --to_left;
       ++to_right;
     }
@@ -311,10 +332,11 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   }
 
   //
-  std::pair<Iterator, bool> insert(const Record& record, bool allow_dup = true) {
+  std::pair<Iterator, bool> insert(Record& record, bool allow_dup = true) {
     if (bitmap_->count() == RECORD_COUNT) return {Iterator(this, RECORD_COUNT), false};
     // page is full, split to be managed by page owner
     Iterator ub = search_ub(record);
+    std::cout << "ub index: " << ub.index() << std::endl;
     if (!allow_dup) {
       for (Iterator it = ub; it < end(); --it) {
         if (get_bit(it) == true) {
@@ -325,36 +347,40 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
       }
     }
 
-    if (get_bit(ub) == 0) {
+    if (get_bit(ub) == false) {
       (*ub).swap(const_cast<Record&>(record));
-      flip_bit(ub);
+      set_bit(ub, true);
       return {ub, true};
     }
     // Moving elements is inevitable
-    records_->insert(ub.base(), record);  // temporarily grows larger than DATA_SIZE
     // Erasing from the tail is more efficient
     bool before_ub = false;
-    auto records__it = records_->end();
-    while (records__it >= records_->begin()) {
-      if (!get_bit(records__it)) {
-        records_->erase(records__it);
-        if (records__it < ub.base()) before_ub = true;
+    auto records_it = records_->end() - 1;
+    while (records_it >= records_->begin()) {
+      if (!get_bit(records_it)) {
+        if (!(*records_it).empty()) records_it = records_->erase(records_it);
+        if (records_it < ub.base()) before_ub = true;
         break;
       }
-      --records__it;
+      --records_it;
     }
     // Bitmap knows nothing about insertion and erasion yet.
     if (before_ub) {
-      // all bits between (records__it, ub-1] need to shift 1 pos forward, overwriting bitmap[records__it]
-      while (records__it < (ub--).base()) {
-        set_bit(records__it, get_bit(records__it++));
+      --ub;
+      records_->insert(ub.base(), record);
+      // all bits between (records_it, ub-1] need to shift 1 pos forward, overwriting bitmap[records_it]
+      while (records_it < ub.base()) {
+        set_bit(records_it, get_bit(records_it++));
       }
       // leaving an empty seat at ub-1, which should be set to true
       set_bit(ub, true);
     } else {
-      // all bit between [ub, records__it) need to shift 1 pos backward, overwriting bitmap[records__it]
-      while (records__it > ub.base()) {
-        set_bit(records__it, get_bit(records__it--));
+      records_->insert(ub.base(), record);
+      // all bit between [ub, records_it) need to shift 1 pos backward, overwriting bitmap[records_it]
+      while (records_it > ub.base()) {
+        bool left_bit = get_bit(records_it - 1);
+        set_bit(records_it, left_bit);
+        --records_it;
       }
       // leaving an empty seat at ub, which should be set to true
       set_bit(ub, true);
@@ -396,6 +422,18 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
       }
     }
     return get_key(mid);
+  }
+
+  bool verify_order() {
+    Record last;
+    std::fill(last.begin(), last.end(), 0);
+    for (Iterator it = begin(); it < end(); ++it) {
+      if (get_bit(it) == 1) {
+        if (std::memcmp(last.data(), (*it).data(), RECORD_SIZE) > 0) return false;
+        last = *it;
+      }
+    }
+    return true;
   }
 };
 

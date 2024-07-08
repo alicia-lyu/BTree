@@ -120,7 +120,7 @@ class MemoryMappedFileImpl {
   [[nodiscard]] const void *data() const noexcept { return data_; }
 
   // Method to get a pointer to a specific page and ensure the full page is read into memory
-  void* get_page_ptr(std::uint64_t file_offset, std::size_t page_size) {
+  virtual void* get_page_ptr(std::uint64_t file_offset, std::size_t page_size) {
     if (file_offset + page_size > size_) {
       throw std::out_of_range("File offset out of range");
     }
