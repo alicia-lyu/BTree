@@ -36,7 +36,7 @@ class DummyMMapFile : public frozenca::MemoryMappedFileImpl {
 int main() {
   DummyMMapFile mmap_file("./Testing/Temporary/mmap.tmp", PAGE_SIZE * 2, true);
   TestPage page(mmap_file, 0);
-//   assert(sizeof(page) == PAGE_SIZE);
+  //   assert(sizeof(page) == PAGE_SIZE);
   Record record;
 
   std::fill(record.begin(), record.end(), 'a');
@@ -73,4 +73,12 @@ int main() {
   assert(inserted == TestPage::RECORD_COUNT);
 
   TestPage right_page(mmap_file, PAGE_SIZE);
+  page.split_with(right_page);
+  assert(page.size() + right_page.size() == TestPage::RECORD_COUNT);
+  assert(page.verify_order());
+  assert(right_page.verify_order());
+  assert(page.size() == right_page.size() || page.size() + 1 == right_page.size());
+  auto left_max = page.max();
+  auto right_min = right_page.min();
+  assert(std::memcmp(left_max.data(), right_min.data(), RECORD_SIZE) <= 0);
 }
