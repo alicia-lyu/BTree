@@ -441,7 +441,26 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
         last_index = it.index_;
       }
     }
+    std::cout << std::endl;
     return true;
+  }
+
+  Record& max() {
+    Iterator it = end() - 1;
+    while (it >= begin()) {
+      if (get_bit(it) == 1) return *it;
+      --it;
+    }
+    return *it;
+  }
+
+  Record& min() {
+    Iterator it = begin();
+    while (it < end()) {
+      if (get_bit(it) == 1) return *it;
+      ++it;
+    }
+    return *it;
   }
 };
 
