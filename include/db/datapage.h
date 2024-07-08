@@ -69,6 +69,8 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   std::vector<Record>* records_;
 
  public:
+  static std::string record_to_string(const Record& record) { return std::string(record.begin(), record.end()); }
+
   // New constructor to use memory-mapped file directly
   FixedRecordDataPage(MMapFile& mmap_file, uintmax_t file_offset)
       : DataPage<PAGE_SIZE>(mmap_file, file_offset),
@@ -278,30 +280,41 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
     if (bitmap_->count() == 0) return begin();
     size_t left = 0;              // inclusive
     size_t right = RECORD_COUNT;  // exclusive
-    while (right - left > 1)      // lock in to one entry
-    {
+    while (right - left > 1) {    // lock in to one entry
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
       if (mid == RECORD_COUNT)  // no valid records between [left, right)
         return Iterator(this, left);
+
       auto record_mid = get_record(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
       int ret = std::memcmp(get_data(key_or_record), record_mid.data(), get_size(key_or_record));
+
+      std::cout << "left: " << left << ", right: " << right << ", mid: " << mid << ", ret: " << ret
+                << ", record_mid: " << record_to_string(record_mid).substr(0, 5) << std::endl;
+
       if (ret < 0) {  // ub is less than or equal to mid
         right = mid + 1;
+        std::cout << "Adjusting right to " << right << std::endl;
         // Only having `right = mid + 1` may enter into infinite loop, when right keeps being reset to left + 2
-        if (right - left == 2) {  // We must find out whether ub is equal to mid
-          if (bitmap_->test(left) == true) {
+        if (right - left == 2) {
+          if (bitmap_->test(left) == true) {  // We must find out whether ub is equal to mid
             auto record_left = get_record(left);
             if (std::memcmp(get_data(key_or_record), record_left.data(), get_size(key_or_record)) < 0) {  // ub is less than mid
               right = mid;
+              // Debug statement
+              std::cout << "Adjusting right to " << right << " after comparing with left record" << std::endl;
               continue;
             }
           }
+          // ub is equal to mid
+          left = mid;
+          // Debug statement
+          std::cout << "Adjusting left to " << left << "after comparing with mid record" << std::endl;
         }
-        // ub is equal to mid
-        left = mid;
-
-      } else if (ret >= 0)  // ub is greater than mid
+      } else if (ret >= 0) {  // ub is greater than mid
         left = mid + 1;
+        // Debug statement
+        std::cout << "Adjusting left to " << left << std::endl;
+      }
     }
     // ub is guaranteed to be not equal, regardless of whether a match exists.
     return Iterator(this, left);
@@ -426,11 +439,19 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
   bool verify_order() {
     Record last;
+    size_t last_index;
     std::fill(last.begin(), last.end(), 0);
     for (Iterator it = begin(); it < end(); ++it) {
       if (get_bit(it) == 1) {
-        if (std::memcmp(last.data(), (*it).data(), RECORD_SIZE) > 0) return false;
+        if (std::memcmp(last.data(), (*it).data(), RECORD_SIZE) > 0) {
+          std::cout << "Order violation: " << record_to_string(last).substr(0, 5) << " (#" << last_index << ") > "
+                    << record_to_string(*it).substr(0, 5) << " (#" << it.index() << ")\n";
+          return false;
+        } else {
+          std::cout << "# " << it.index() << " " << record_to_string(*it).substr(0, 5) << "; ";
+        }
         last = *it;
+        last_index = it.index();
       }
     }
     return true;
