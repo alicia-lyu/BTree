@@ -123,7 +123,11 @@ add_executable(db_tests
     test/test_statistics.h
     test/test_statistics.cpp
     test/fc_catch2.h
-    test/test_fixed_page.cpp
+    test/dbtest_fixed_page.cpp
+)
+
+add_executable(dbtests_manual
+    test/dbtests_manual.cpp
 )
 
 if (${Catch_VER} EQUAL 2)
@@ -143,11 +147,13 @@ target_include_directories(db_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_link_libraries(fc_tests PRIVATE ${CATCH_LIBS_ALIASES} BTree::BTree)
 target_link_libraries(fc_benchmarks PRIVATE ${CATCH_LIBS_ALIASES} BTree::BTree)
 target_link_libraries(db_tests PRIVATE ${CATCH_LIBS_ALIASES} BTree::BTree BTree::DBBTree)
+target_link_libraries(dbtests_manual PRIVATE BTree::BTree BTree::DBBTree)
 
 if(MSVC)
     target_compile_options(fc_tests PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
     target_compile_options(fc_benchmarks PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
     target_compile_options(db_tests PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
+    target_compile_options(dbtests_manual PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
     set(CMAKE_C_FLAGS_RELEASE "/Ox")
     set(CMAKE_CXX_FLAGS_RELEASE "/Ox")
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/Ox")
@@ -159,20 +165,24 @@ else()
         target_compile_options(fc_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
         target_compile_options(fc_benchmarks PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
         target_compile_options(db_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
+        target_compile_options(dbtests_manual PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
     else ()
         target_compile_options(fc_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
         target_compile_options(fc_benchmarks PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
         target_compile_options(db_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
+        target_compile_options(dbtests_manual PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
     endif ()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS_EQUAL 14.0.3.14030022)
         target_link_options(fc_tests PRIVATE -fexperimental-library)
         target_link_options(fc_benchmarks PRIVATE -fexperimental-library)
         target_link_options(db_tests PRIVATE -fexperimental-library)
+        target_link_options(dbtests_manual PRIVATE -fexperimental-library)
     endif()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS_EQUAL 14)
         target_link_options(fc_tests PRIVATE -fexperimental-library)
         target_link_options(fc_benchmarks PRIVATE -fexperimental-library)
         target_link_options(db_tests PRIVATE -fexperimental-library)
+        target_link_options(dbtests_manual PRIVATE -fexperimental-library)
     endif()
 endif()
 

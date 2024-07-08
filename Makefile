@@ -10,8 +10,5 @@ fc_tests: rebuild
 fc_benchmarks: rebuild
 	cd build && ./fc_benchmarks
 
-db_tests: rebuild
-	cd build && ./db_tests
-
-db_tests_debug: rebuild
-	cd build && lldb -- ./db_tests
+dbtests_debug: rebuild
+	cd build && lldb -- ./dbtests_manual
