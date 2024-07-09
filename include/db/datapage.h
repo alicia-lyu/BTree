@@ -64,13 +64,33 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   using KeyOrRecord = std::variant<Record, Key>;
   using typename DataPage<PAGE_SIZE>::MMapFile;
 
+  static std::string record_to_string(const Record& record) { return std::string(record.begin(), record.end()); }
+
+  static const void* get_data(const KeyOrRecord key_or_record) {
+    if (std::holds_alternative<Record>(key_or_record)) {
+      const Record& record = std::get<Record>(key_or_record);
+      return static_cast<const void*>(record.data());
+    } else {  // std::holds_alternative<Key>(key_or_record)
+      const Key& key = std::get<Key>(key_or_record);
+      return static_cast<const void*>(key.data());
+    }
+  }
+
+  static size_t get_size(const KeyOrRecord key_or_record) {
+    if (std::holds_alternative<Record>(key_or_record)) {
+      const Record& record = std::get<Record>(key_or_record);
+      return record.size();
+    } else {  // std::holds_alternative<Key>(key_or_record)
+      const Key& key = std::get<Key>(key_or_record);
+      return key.size();
+    }
+  }
+
  protected:
   std::bitset<RECORD_COUNT>* bitmap_;  // 0 for free, 1 for occupied
   RecordData* record_data_;
 
  public:
-  static std::string record_to_string(const Record& record) { return std::string(record.begin(), record.end()); }
-
   // New constructor to use memory-mapped file directly
   FixedRecordDataPage(MMapFile& mmap_file, uintmax_t file_offset)
       : DataPage<PAGE_SIZE>(mmap_file, file_offset),
@@ -136,7 +156,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
     Iterator(FixedRecordDataPage* page, size_t index) : page_(page), index_(index) {}
 
-      void advance_to_valid() {
+    void advance_to_valid() {
       while (index_ < RECORD_COUNT && !(*page_->bitmap_)[index_]) {
         ++index_;
       }
@@ -199,29 +219,9 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
 
   void flip_bit(Iterator it) { bitmap_->flip(it.index_); }
 
-  void set_bit(Iterator it, bool value) { 
-    std::cout << "Setting bit at index " << it.index_ << " to " << value << std::endl;
+  void set_bit(Iterator it, bool value) {
+    // std::cout << "Setting bit at index " << it.index_ << " to " << value << std::endl;
     bitmap_->set(it.index_, value);
-  }
-
-  const void* get_data(const KeyOrRecord key_or_record) {
-    if (std::holds_alternative<Record>(key_or_record)) {
-      const Record& record = std::get<Record>(key_or_record);
-      return static_cast<const void*>(record.data());
-    } else {  // std::holds_alternative<Key>(key_or_record)
-      const Key& key = std::get<Key>(key_or_record);
-      return static_cast<const void*>(key.data());
-    }
-  }
-
-  size_t get_size(const KeyOrRecord key_or_record) {
-    if (std::holds_alternative<Record>(key_or_record)) {
-      const Record& record = std::get<Record>(key_or_record);
-      return record.size();
-    } else {  // std::holds_alternative<Key>(key_or_record)
-      const Key& key = std::get<Key>(key_or_record);
-      return key.size();
-    }
   }
 
  public:
@@ -231,7 +231,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
   std::optional<Iterator> search_lb(const KeyOrRecord& key_or_record) {
     if (bitmap_->count() == 0) return end();
     size_t left = find_first_occupied(0);  // inclusive
-    auto ret = std::memcmp(get_data(key_or_record), get_record(left)->data(), get_size(key_or_record));
+    auto ret = std::memcmp(get_data(key_or_record), get_record_ptr(left), get_size(key_or_record));
     if (ret == 0)
       return Iterator(this, left);  // Early return helps guarantee left < key_or_record
     else if (ret < 0)
@@ -364,6 +364,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE> {
       --it;
     }
     // Bitmap knows nothing about insertion and erasion yet.
+    // LATER: Migrate to std::shift_left and std::shift_right
     if (before_ub) {
       --ub;
       // all bits between (records_it, ub-1] need to shift 1 pos forward, overwriting bitmap[records_it]

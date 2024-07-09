@@ -2,6 +2,7 @@
 #define __FC_BTREE_H__
 
 #include <cstddef>
+#include <variant>
 #ifndef FC_USE_SIMD
 #define FC_USE_SIMD 0
 #endif // FC_USE_SIMD
@@ -169,9 +170,13 @@ requires(Fanout >= 2) class BTreeBase {
 #endif // FC_USE_SIND
     using keys_type =
         std::conditional_t<is_disk_, std::array<V, disk_max_nkeys>,
-                           std::vector<V>>; 
-    // TODO: Add conditional is_variable_ to be a separately defined node page structure
-    // For non-leaf nodes, replace this for is_variable_ || is_disk_ with separate keys 
+                           std::vector<V>>;
+    using children_type = std::conditional_t<is_disk_,
+        std::variant<
+            std::vector<std::unique_ptr<Node, Deleter>>,
+            std::array<size_t, disk_max_nkeys> // branch nodes store pointers to the next level, leaf nodes store data page indexes. Only happens when insert_page is called
+        >,
+        std::vector<std::unique_ptr<Node>>>;
 
     // invariant: except root, t - 1 <= #(key) <= 2 * t - 1
     // invariant: for root, 0 <= #(key) <= 2 * t - 1
@@ -183,15 +188,13 @@ requires(Fanout >= 2) class BTreeBase {
     keys_type keys_;
     Node *parent_ = nullptr;
     attr_t size_ = 0; // number of keys in the subtree (not keys in this node)
-    attr_t index_ = 0;
+    attr_t index_ = 0; // index in parent's children_
     attr_t height_ = 0;
     attr_t num_keys_ =
         0; // number of keys in this node, used only for disk variant
-    std::vector<std::conditional_t<is_disk_, std::unique_ptr<Node, Deleter>,
-                                   std::unique_ptr<Node>>>
-        children_;
+    children_type children_;
     
-    std::vector<size_t> leaves_ = {}; // Should only have elements when children_ is empty
+    std::optional<std::array<size_t, disk_max_nkeys>> datapage_offsets = {}; // Should only have elements when children_ is empty
 
     Node() { keys_.reserve(disk_max_nkeys); }
 
@@ -207,7 +210,19 @@ requires(Fanout >= 2) class BTreeBase {
     Node(Node &&node) = delete;
     Node &operator=(Node &&node) = delete;
 
-    [[nodiscard]] bool is_leaf() const noexcept { return children_.empty(); }
+    // Has children, whether as nodes or data page indices
+    [[nodiscard]] bool is_leaf() const noexcept { // All nodes in DBBtree is not leaf, i.e. with children to manage
+      return children_.empty();
+    }
+
+    [[nodiscard]] bool no_children_nodes() const noexcept {
+      if constexpr (is_disk_) {
+        if (children_.empty()) return true;
+        return std::holds_alternative<size_t>(children_[0]);
+      } else {
+        return is_leaf();
+      }
+    }
 
     [[nodiscard]] bool is_full() const noexcept {
       if constexpr (is_disk_) {
@@ -344,7 +359,7 @@ requires(Fanout >= 2) class BTreeBase {
 
     void increment() noexcept {
       // we don't do past to end() check for efficiency
-      if (!node_->is_leaf()) {
+      if (!node_->no_children_nodes()) {
         node_ = leftmost_leaf(node_->children_[index_ + 1].get());
         index_ = 0;
       } else {
@@ -357,7 +372,7 @@ requires(Fanout >= 2) class BTreeBase {
     }
 
     void decrement() noexcept {
-      if (!node_->is_leaf()) {
+      if (!node_->no_children_nodes()) {
         node_ = rightmost_leaf(node_->children_[index_].get());
         index_ = node_->nkeys() - 1;
       } else if (index_ > 0) {
@@ -517,7 +532,7 @@ public:
 
     // invariant: child_0 <= key_0 <= child_1 <= ... <=  key_(N - 1) <=
     // child_N
-    if (!node->is_leaf()) {
+    if (!node->no_children_nodes()) {
       auto num_keys = node->nkeys();
 
       for (attr_t i = 0; i < node->nkeys(); ++i) {
@@ -624,28 +639,28 @@ public:
   }
 
   static Node *rightmost_leaf(Node *curr) noexcept {
-    while (curr && !curr->is_leaf()) {
+    while (curr && !curr->no_children_nodes()) {
       curr = curr->children_[std::ssize(curr->children_) - 1].get();
     }
     return curr;
   }
 
   static const Node *rightmost_leaf(const Node *curr) noexcept {
-    while (curr && !curr->is_leaf()) {
+    while (curr && !curr->no_children_nodes()) {
       curr = curr->children_[std::ssize(curr->children_) - 1].get();
     }
     return curr;
   }
 
   static Node *leftmost_leaf(Node *curr) noexcept {
-    while (curr && !curr->is_leaf()) {
+    while (curr && !curr->no_children_nodes()) {
       curr = curr->children_[0].get();
     }
     return curr;
   }
 
   static const Node *leftmost_leaf(const Node *curr) noexcept {
-    while (curr && !curr->is_leaf()) {
+    while (curr && !curr->no_children_nodes()) {
       curr = curr->children_[0].get();
     }
     return curr;
@@ -698,14 +713,18 @@ protected:
       node->size_ += orphan_size;
       sibling->size_ -= orphan_size;
 
-      sibling->children_.front()->parent_ = node;
-      sibling->children_.front()->index_ =
-          static_cast<attr_t>(std::ssize(node->children_));
+      if (!sibling->no_children_nodes()) {
+        sibling->children_.front()->parent_ = node;
+        sibling->children_.front()->index_ =
+        static_cast<attr_t>(std::ssize(node->children_));
+      }
       node->children_.push_back(std::move(sibling->children_.front()));
       std::shift_left(sibling->children_.begin(), sibling->children_.end(), 1);
       sibling->children_.pop_back();
-      for (auto &&child : sibling->children_) {
-        child->index_--;
+      if (!sibling->no_children_nodes()) {
+        for (auto &&child : sibling->children_) {
+          child->index_--;
+        }
       }
     }
   }
@@ -759,15 +778,17 @@ protected:
 
     if (!node->is_leaf()) {
       // brings n children from sibling
-      attr_t orphan_size = 0;
-      attr_t immigrant_index = static_cast<attr_t>(std::ssize(node->children_));
-      for (auto &&immigrant : sibling->children_ | std::views::take(n)) {
-        immigrant->parent_ = node;
-        immigrant->index_ = immigrant_index++;
-        orphan_size += immigrant->size_;
+      if (!sibling->no_children_nodes()) {
+        attr_t orphan_size = 0;
+        attr_t immigrant_index = static_cast<attr_t>(std::ssize(node->children_));
+        for (auto &&immigrant : sibling->children_ | std::views::take(n)) {
+            immigrant->parent_ = node;
+            immigrant->index_ = immigrant_index++;
+            orphan_size += immigrant->size_;
+        }
+        node->size_ += orphan_size;
+        sibling->size_ -= orphan_size;
       }
-      node->size_ += orphan_size;
-      sibling->size_ -= orphan_size;
 
       std::ranges::move(sibling->children_ | std::views::take(n),
                         std::back_inserter(node->children_));
@@ -776,8 +797,10 @@ protected:
         sibling->children_.pop_back();
       }
       attr_t sibling_index = 0;
-      for (auto &&child : sibling->children_) {
-        child->index_ = sibling_index++;
+      if (!sibling->no_children_nodes()) {
+        for (auto &&child : sibling->children_) {
+            child->index_ = sibling_index++;
+        }
       }
     }
   }
@@ -813,18 +836,21 @@ protected:
     sibling->size_--;
 
     if (!node->is_leaf()) {
-      const auto orphan_size = sibling->children_.back()->size_;
-      node->size_ += orphan_size;
-      sibling->size_ -= orphan_size;
+      if (!sibling->no_children_nodes()) {
+        const auto orphan_size = sibling->children_.back()->size_;
+        node->size_ += orphan_size;
+        sibling->size_ -= orphan_size;
 
-      sibling->children_.back()->parent_ = node;
-      sibling->children_.back()->index_ = 0;
+        sibling->children_.back()->parent_ = node;
+        sibling->children_.back()->index_ = 0;
+      }
 
       node->children_.insert(node->children_.begin(),
                              std::move(sibling->children_.back()));
       sibling->children_.pop_back();
       for (auto &&child : node->children_ | std::views::drop(1)) {
-        child->index_++;
+        if (node->no_children_nodes())
+          child->index_++;
       }
     }
   }
@@ -881,17 +907,19 @@ protected:
 
     if (!node->is_leaf()) {
       // brings n children from sibling
-      attr_t orphan_size = 0;
-      attr_t immigrant_index = 0;
-      for (auto &&immigrant :
-           sibling->children_ |
-               std::views::drop(std::ssize(sibling->children_) - n)) {
-        immigrant->parent_ = node;
-        immigrant->index_ = immigrant_index++;
-        orphan_size += immigrant->size_;
+      if (!sibling->no_children_nodes()) {
+        attr_t orphan_size = 0;
+        attr_t immigrant_index = 0;
+        for (auto &&immigrant :
+            sibling->children_ |
+                std::views::drop(std::ssize(sibling->children_) - n)) {
+          immigrant->parent_ = node;
+          immigrant->index_ = immigrant_index++;
+          orphan_size += immigrant->size_;
+        }
+        node->size_ += orphan_size;
+        sibling->size_ -= orphan_size;
       }
-      node->size_ += orphan_size;
-      sibling->size_ -= orphan_size;
 
       std::ranges::move(
           sibling->children_ |
@@ -903,8 +931,11 @@ protected:
         sibling->children_.pop_back();
       }
       attr_t child_index = n;
+      if (node->no_children_nodes()) {
+        child_index = 0;
+      }
       for (auto &&child : node->children_ | std::views::drop(n)) {
-        child->index_ = child_index++;
+          child->index_ = child_index++;
       }
     }
   }
@@ -951,7 +982,7 @@ protected:
       auto i = get_lb(key, x);
       if (i < x->nkeys() && key == Proj{}(x->keys_[i])) { // equal? key found
         return const_iterator_type(x, static_cast<attr_t>(i));
-      } else if (x->is_leaf()) { // no child, key is not in the tree
+      } else if (x->no_children_nodes()) { // no child, key is not in the tree
         return cend();
       } else { // search on child between range
         x = x->children_[i].get();
@@ -964,7 +995,7 @@ protected:
     auto x = root_.get();
     while (x) {
       auto i = get_lb(key, x);
-      if (x->is_leaf()) {
+      if (x->no_children_nodes()) {
         auto it = nonconst_iterator_type(x, static_cast<attr_t>(i));
         // before climbing, if the lower bound is a key not in the leaf node, 
         // it points to the end() of the largest leaf node that's smaller than key (leaf node lower bound)
@@ -983,7 +1014,7 @@ protected:
     auto x = root_.get();
     while (x) {
       auto i = get_lb(key, x);
-      if (x->is_leaf()) {
+      if (x->no_children_nodes()) {
         auto it = const_iterator_type(x, static_cast<attr_t>(i));
         if (climb) {
           it.climb();
@@ -1000,7 +1031,7 @@ protected:
     auto x = root_.get();
     while (x) {
       auto i = get_ub(key, x);
-      if (x->is_leaf()) {
+      if (x->no_children_nodes()) {
         auto it = nonconst_iterator_type(x, static_cast<attr_t>(i));
         if (climb) {
           it.climb();
@@ -1017,7 +1048,7 @@ protected:
     auto x = root_.get();
     while (x) {
       auto i = get_ub(key, x);
-      if (x->is_leaf()) {
+      if (x->no_children_nodes()) {
         auto it = const_iterator_type(x, static_cast<attr_t>(i));
         if (climb) {
           it.climb();
@@ -1062,10 +1093,12 @@ protected:
       // bring right half children from y
       std::ranges::move(y->children_ | std::views::drop(Fanout),
                         std::back_inserter(z->children_));
-      for (auto &&child : z->children_) {
-        child->parent_ = z.get();
-        child->index_ -= Fanout;
-        z_size += child->size_;
+      if (!z->no_children_nodes()) {
+        for (auto &&child : z->children_) {
+          child->parent_ = z.get();
+          child->index_ -= Fanout;
+          z_size += child->size_;
+        }
       }
       while (static_cast<attr_t>(std::ssize(y->children_)) > Fanout) {
         y->children_.pop_back();
@@ -1075,7 +1108,7 @@ protected:
     y->size_ -= (z_size + 1);
 
     x->children_.insert(x->children_.begin() + i + 1, std::move(z));
-    for (auto &&child : x->children_ | std::views::drop(i + 2)) {
+    for (auto &&child : x->children_ | std::views::drop(i + 2)) { // x is guaranteed to have children nodes
       child->index_++;
     }
 
@@ -1123,11 +1156,12 @@ protected:
     // bring children of child[i + 1]
     if (!y->is_leaf()) {
       attr_t immigrant_index = static_cast<attr_t>(std::ssize(y->children_));
-      for (auto &&child : sibling->children_) {
-        child->parent_ = y;
-        child->index_ = immigrant_index++;
-        immigrated_size += child->size_;
-      }
+      if (!sibling.no_children_nodes()) {
+        for (auto &&child : sibling->children_) {
+          child->parent_ = y;
+          child->index_ = immigrant_index++;
+          immigrated_size += child->size_;
+      }}
       std::ranges::move(sibling->children_, std::back_inserter(y->children_));
     }
     y->size_ += immigrated_size + 1;
@@ -1641,6 +1675,28 @@ public:
     return insert_value(std::move(key));
   }
 
+  std::conditional_t<AllowDup, iterator_type, std::pair<iterator_type, bool>>
+  insert_page(const V &lb_key, size_t page_index) {
+    auto it = insert_value(lb_key);
+    if (!AllowDup) {
+      if (!it.second) {
+        return it; // failed
+      } else it = it.first;
+    }
+    Node node = it.node_;
+    attr_t index = it.index_;
+    if (!it.node->no_children_nodes()) {
+      // first key in leftmost leaf in its right subtree
+      node = leftmost_leaf(it.node->children_[it.index_ + 1].get());
+      index = 0;
+    }
+    // Guaranteed no_children_nodes
+    if (node.is_leaf()) // uninitialized
+      node.children_ = std::array<size_t, disk_max_nkeys>{};
+    node->children_[index](page_index);
+    assert(verify());
+  }
+
   template <typename... Args>
   std::conditional_t<AllowDup, iterator_type, std::pair<iterator_type, bool>>
   emplace(Args &&...args) requires std::is_constructible_v<V, Args...> {
@@ -1670,7 +1726,7 @@ public:
       auto i = get_lb(key, x);
       if (i < x->nkeys() && key == Proj{}(x->keys_[i])) {
         return iterator_type(x, static_cast<attr_t>(i))->second;
-      } else if (x->is_leaf()) {
+      } else if (x->no_children_nodes()) {
         V val{std::move(key), {}};
         return insert_leaf(x, static_cast<attr_t>(i), std::move(val))->second;
       } else {
@@ -1871,6 +1927,12 @@ protected:
           return false;
         }
       }
+    } else if constexpr (is_disk_) { // Read page offsets // TODO: Add dedicated condition
+      if (!is.read(reinterpret_cast<char *>(node->children_.data()),
+                   (node->num_keys_ + 1) * sizeof(std::size_t))) {
+        std::cerr << "Tree deserialization: page data read error\n";
+        return false;
+      }
     }
     if (node->parent_) {
       node->parent_->size_ += node->size_;
@@ -1940,6 +2002,7 @@ public:
   friend struct join_helper;
 
 protected:
+  // TODO: Pending page
   std::pair<BTreeBase, BTreeBase>
   split_to_two_trees(const_iterator_type iter_lb, const_iterator_type iter_ub) {
     BTreeBase tree_left(alloc_);
@@ -2124,6 +2187,7 @@ public:
   }
 }
 
+  // TODO: Pending page
   template <typename T_>
   requires std::is_constructible_v<V, std::remove_cvref_t<T_>>
   join_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_left,
