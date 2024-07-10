@@ -171,11 +171,41 @@ requires(Fanout >= 2) class BTreeBase {
     using keys_type =
         std::conditional_t<is_disk_, std::array<V, disk_max_nkeys>,
                            std::vector<V>>;
+    using children_nodes_type = std::vector<std::unique_ptr<Node, Deleter>>;
+    using children_data_type = std::array<size_t, disk_max_nkeys>;
+    
+    class Children: public std::variant<
+            children_nodes_type,
+            children_data_type // branch nodes store pointers to the next level, leaf nodes store data page indexes. Only happens when insert_page is called
+      > {
+    public:
+      void reserve(size_t n) {
+        if (std::holds_alternative<children_nodes_type>(*this)) {
+          std::get<children_nodes_type>(*this).reserve(n);
+        } else {
+          throw std::runtime_error("Cannot reserve for children_data_type");
+        }
+      };
+
+      void push_back(std::unique_ptr<Node, Deleter> &&node) {
+        if (std::holds_alternative<children_nodes_type>(*this)) {
+          std::get<children_nodes_type>(*this).push_back(std::move(node));
+        } else {
+          throw std::runtime_error("Cannot push_back for children_data_type");
+        }
+      };
+
+      std::variant<std::unique_ptr<Node, Deleter>&, size_t&> operator[](size_t idx) {
+        if (std::holds_alternative<children_nodes_type>(*this)) {
+          return std::get<children_nodes_type>(*this)[idx];
+        } else {
+          return std::get<children_data_type>(*this)[idx];
+        }
+      };
+    };
+
     using children_type = std::conditional_t<is_disk_,
-        std::variant<
-            std::vector<std::unique_ptr<Node, Deleter>>,
-            std::array<size_t, disk_max_nkeys> // branch nodes store pointers to the next level, leaf nodes store data page indexes. Only happens when insert_page is called
-        >,
+        Children,
         std::vector<std::unique_ptr<Node>>>;
 
     // invariant: except root, t - 1 <= #(key) <= 2 * t - 1
@@ -193,8 +223,6 @@ requires(Fanout >= 2) class BTreeBase {
     attr_t num_keys_ =
         0; // number of keys in this node, used only for disk variant
     children_type children_;
-    
-    std::optional<std::array<size_t, disk_max_nkeys>> datapage_offsets = {}; // Should only have elements when children_ is empty
 
     Node() { keys_.reserve(disk_max_nkeys); }
 
@@ -1589,6 +1617,30 @@ public:
     return const_iterator_type(find_upper_bound(key));
   }
 
+  std::pair<iterator_type, size_t> find_page(const K& key_lb) {
+    const_iterator_type it;
+    size_t page_index;
+    std::tie(it, page_index) = find_page(key_lb);
+    return {const_iterator_type(it), page_index};
+  }
+
+  std::pair<const_iterator_type, size_t> find_page(const K& key_lb) const {
+    auto it = find_lower_bound(key_lb);
+    if (it == cend()) {
+      return {it, std::numeric_limits<size_t>::max()};
+    }
+    auto node = it.node_;
+    auto index = it.index_;
+    if (!node->no_children_nodes()) {
+      node = leftmost_leaf(node->children_[index + 1].get());
+      index = 0;
+    } else {
+      ++index; // right child
+    }
+    assert(node->children_.size() > index);
+    return {it, node->children_[index].size()};
+  }
+
   std::ranges::subrange<iterator_type> equal_range(const K &key) {
     return {iterator_type(find_lower_bound(key)),
             iterator_type(find_upper_bound(key))};
@@ -1640,6 +1692,7 @@ protected:
       root_->parent_ = new_root.get();
       new_root->size_ = root_->size_;
       new_root->height_ = root_->height_ + 1;
+      
       new_root->children_.reserve(Fanout * 2);
       new_root->children_.push_back(std::move(root_));
       root_ = std::move(new_root);
@@ -1927,9 +1980,15 @@ protected:
           return false;
         }
       }
-    } else if constexpr (is_disk_) { // Read page offsets // TODO: Add dedicated condition
-      if (!is.read(reinterpret_cast<char *>(node->children_.data()),
-                   (node->num_keys_ + 1) * sizeof(std::size_t))) {
+    } else {
+      bool page_ref_existence = false;
+      if (!is.read(reinterpret_cast<char *>(&page_ref_existence), 1)) {
+        std::cerr << "Tree deserialization: page refs existence read error\n";
+        return false;
+      }
+      if (page_ref_existence) 
+        if (!is.read(reinterpret_cast<char *>(node->children_.data()),
+              (node->num_keys_ + 1) * sizeof(std::size_t))) {
         std::cerr << "Tree deserialization: page data read error\n";
         return false;
       }
@@ -1989,6 +2048,18 @@ protected:
     if (node->height_ > 0) {
       for (attr_t i = 0; i <= node->num_keys_; ++i) {
         if (!serialize_node(os, node->children_[i].get())) {
+          return false;
+        }
+      }
+    } else {
+      if (!os.write(reinterpret_cast<const char *>(node->is_leaf()),
+                    1)) {
+        std::cerr << "Tree serialization: page refs existence write error\n";
+        return false;
+      }
+      if (!node->is_leaf()) {
+        if (!os.write(reinterpret_cast<const char *>(node->children_), (node->num_keys_ + 1) * sizeof(std::size_t))) {
+          std::cerr << "Tree serialization: page refs write error\n";
           return false;
         }
       }

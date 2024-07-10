@@ -1,25 +1,25 @@
-set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${CMAKE_SOURCE_DIR}/cmake/modules")
 cmake_minimum_required(VERSION 3.16)
 
+set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${CMAKE_SOURCE_DIR}/cmake/modules")
 set(MAJOR "0")
 set(MINOR "0")
 set(PATCH "1")
-cmake_policy(SET CMP0048 NEW)
 
+cmake_policy(SET CMP0048 NEW)
 project(BTree VERSION ${MAJOR}.${MINOR}.${PATCH})
 
-option(FORCE_USE_SIMD "force define FC_USE_SIMD (apllicable only for x86_64)" OFF)
+option(FORCE_USE_SIMD "force define FC_USE_SIMD (applicable only for x86_64)" OFF)
 option(FORCE_PREFER_BINARY_SEARCH "force define FC_PREFER_BINARY_SEARCH (recommended for clang only)" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Include Homebrew directories
+# Include Homebrew directories for macOS
 if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     if (EXISTS "/opt/homebrew")
-        list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
+        list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew/include")
     else()
-        list(APPEND CMAKE_PREFIX_PATH "/usr/local")
+        list(APPEND CMAKE_PREFIX_PATH "/usr/local/include")
     endif()
 endif()
 
@@ -35,12 +35,14 @@ if (NOT Catch2_FOUND)
 endif()
 set(CATCH_LIBS_ALIASES Catch2::Catch2 Catch2::Catch2WithMain)
 
+message(STATUS "Catch2 found: ${Catch2_FOUND}")
+message(STATUS "Catch2 version: ${Catch_VER}")
+
 function(get_linux_lsb_release_information)
     find_program(LSB_RELEASE_EXEC lsb_release)
     if(NOT LSB_RELEASE_EXEC)
         message(FATAL_ERROR "Could not detect lsb_release executable, can not gather required information")
     endif()
-
     execute_process(COMMAND "${LSB_RELEASE_EXEC}" --short --id OUTPUT_VARIABLE LSB_RELEASE_ID_SHORT OUTPUT_STRIP_TRAILING_WHITESPACE)
     execute_process(COMMAND "${LSB_RELEASE_EXEC}" --short --release OUTPUT_VARIABLE LSB_RELEASE_VERSION_SHORT OUTPUT_STRIP_TRAILING_WHITESPACE)
     execute_process(COMMAND "${LSB_RELEASE_EXEC}" --short --codename OUTPUT_VARIABLE LSB_RELEASE_CODENAME_SHORT OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -77,19 +79,12 @@ add_library(DBBTree INTERFACE
     include/db/db_btree.h
     include/db/datapage.h)
 
-target_include_directories(
-    BTree
-    INTERFACE
+foreach(target IN LISTS BTree DBBTree)
+    target_include_directories(${target} INTERFACE
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-)
-
-target_include_directories(
-    DBBTree
-    INTERFACE
-        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
-)
+    )
+endforeach()
 
 add_library(BTree::BTree ALIAS BTree)
 add_library(BTree::DBBTree ALIAS DBBTree)
@@ -102,58 +97,91 @@ if (FORCE_USE_SIMD)
     add_definitions(-DFC_USE_SIMD=1)
 endif()
 
-add_executable(fc_tests
+add_library(catch_prereqs INTERFACE
     test/test_statistics.h
     test/test_statistics.cpp
     test/fc_catch2.h
+)
+
+target_link_libraries(catch_prereqs INTERFACE ${CATCH_LIBS_ALIASES})
+
+add_executable(fc_tests
     test/unittest.cpp
     test/rwtest.cpp
 )
 
 add_executable(fc_benchmarks
-    test/test_statistics.h
-    test/test_statistics.cpp
-    test/fc_catch2.h
     test/perftest.cpp
     test/perftest_no_simd.cpp
     test/perftest_string.cpp
 )
 
 add_executable(db_tests
-    test/test_statistics.h
-    test/test_statistics.cpp
-    test/fc_catch2.h
     test/dbtest_fixed_page.cpp
 )
 
 add_executable(dbtests_manual
-    test/dbtests_manual.cpp
+    test/dbtest_fixed_page_manual.cpp
 )
+
+set(CATCH2_EXECUTABLES fc_tests fc_benchmarks db_tests)
+set(MANUAL_EXECUTABLES dbtests_manual)
+set(DB_EXECUTABLES db_tests dbtests_manual)
+set(TEST_EXECUTABLES ${CATCH2_EXECUTABLES} ${MANUAL_EXECUTABLES})
+message(STATUS "TEST_EXECUTABLES: ${TEST_EXECUTABLES}")
 
 if (${Catch_VER} EQUAL 2)
     message(STATUS "Used old target for catch2")
     if (NOT TARGET Catch2::Catch2WithMain)
         set(CATCH_LIBS_ALIASES Catch2::Catch2)
     endif()
-    target_compile_definitions(fc_tests PRIVATE CATCH2_OLD)
-    target_compile_definitions(fc_benchmarks PRIVATE CATCH2_OLD)
-    target_compile_definitions(db_tests PRIVATE CATCH2_OLD)
+    foreach(target ${CATCH2_EXECUTABLES})
+        target_compile_definitions(${target} PRIVATE CATCH2_OLD)
+    endforeach()
 endif()
 
-target_include_directories(fc_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
-target_include_directories(fc_benchmarks PRIVATE ${CMAKE_CURRENT_LIST_DIR})
-target_include_directories(db_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+foreach(target ${TEST_EXECUTABLES})
+    target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/include)
+    target_link_libraries(${target} PRIVATE BTree::BTree)
+endforeach()
 
-target_link_libraries(fc_tests PRIVATE ${CATCH_LIBS_ALIASES} BTree::BTree)
-target_link_libraries(fc_benchmarks PRIVATE ${CATCH_LIBS_ALIASES} BTree::BTree)
-target_link_libraries(db_tests PRIVATE ${CATCH_LIBS_ALIASES} BTree::BTree BTree::DBBTree)
-target_link_libraries(dbtests_manual PRIVATE BTree::BTree BTree::DBBTree)
+foreach(target ${CATCH2_EXECUTABLES})
+    target_link_libraries(${target} PRIVATE catch_prereqs)
+endforeach()
+
+foreach(target ${DB_EXECUTABLES})
+    target_link_libraries(${target} PRIVATE BTree::DBBTree)
+endforeach()
+
+foreach(target ${TEST_EXECUTABLES})
+    get_target_property(INC_DIRS ${target} INCLUDE_DIRECTORIES)
+    message(STATUS "Include directories for target ${target}: ${INC_DIRS}")
+    get_target_property(LINK_LIBS ${target} LINK_LIBRARIES)
+    message(STATUS "Link libraries for target ${target}: ${LINK_LIBS}")
+endforeach()
+
 
 if(MSVC)
-    target_compile_options(fc_tests PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
-    target_compile_options(fc_benchmarks PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
-    target_compile_options(db_tests PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
-    target_compile_options(dbtests_manual PRIVATE /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
+    set(compile_options /W4 /WX /nologo /MDd /EHsc /std:c++latest /experimental:module)
+else()
+    set(compile_options -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
+    if (FORCE_USE_SIMD)
+        list(APPEND compile_options -mavx512f)
+    endif()
+    if((CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS_EQUAL 14.0.3.14030022) OR
+       (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS_EQUAL 14))
+        set(link_options -fexperimental-library)
+    endif()
+endif()
+
+foreach(target ${TEST_EXECUTABLES})
+    target_compile_options(${target} PRIVATE ${compile_options})
+    if (link_options)
+        target_link_options(${target} PRIVATE ${link_options})
+    endif()
+endforeach()
+
+if(MSVC)
     set(CMAKE_C_FLAGS_RELEASE "/Ox")
     set(CMAKE_CXX_FLAGS_RELEASE "/Ox")
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/Ox")
@@ -161,39 +189,13 @@ else()
     set(CMAKE_C_FLAGS_RELEASE "-O3")
     set(CMAKE_CXX_FLAGS_RELEASE "-O3")
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3")
-    if (FORCE_USE_SIMD)
-        target_compile_options(fc_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
-        target_compile_options(fc_benchmarks PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
-        target_compile_options(db_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
-        target_compile_options(dbtests_manual PRIVATE -Wall -Wextra -Wpedantic -Werror -mavx512f)
-    else ()
-        target_compile_options(fc_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
-        target_compile_options(fc_benchmarks PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
-        target_compile_options(db_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
-        target_compile_options(dbtests_manual PRIVATE -Wall -Wextra -Wpedantic -Werror -march=native -mtune=generic)
-    endif ()
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS_EQUAL 14.0.3.14030022)
-        target_link_options(fc_tests PRIVATE -fexperimental-library)
-        target_link_options(fc_benchmarks PRIVATE -fexperimental-library)
-        target_link_options(db_tests PRIVATE -fexperimental-library)
-        target_link_options(dbtests_manual PRIVATE -fexperimental-library)
-    endif()
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS_EQUAL 14)
-        target_link_options(fc_tests PRIVATE -fexperimental-library)
-        target_link_options(fc_benchmarks PRIVATE -fexperimental-library)
-        target_link_options(db_tests PRIVATE -fexperimental-library)
-        target_link_options(dbtests_manual PRIVATE -fexperimental-library)
-    endif()
 endif()
 
 include(CTest)
 include(Catch)
-catch_discover_tests(fc_tests
-    EXTRA_ARGS --benchmark-samples=1)
-catch_discover_tests(fc_benchmarks
-    EXTRA_ARGS --benchmark-samples=1)
-catch_discover_tests(db_tests
-    EXTRA_ARGS --benchmark-samples=1)
+catch_discover_tests(fc_tests EXTRA_ARGS --benchmark-samples=1)
+catch_discover_tests(fc_benchmarks EXTRA_ARGS --benchmark-samples=1)
+catch_discover_tests(db_tests EXTRA_ARGS --benchmark-samples=1)
 
 set(CPACK_SOURCE_IGNORE_FILES
     #git files
