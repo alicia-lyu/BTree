@@ -14,26 +14,42 @@ namespace children {
 
 using namespace frozenca;
 
-template <class Node, class Deleter>
-class Child : public std::variant<std::unique_ptr<Node, Deleter>, size_t> {
+template <typename Node, typename Deleter>
+class ChildProxy {
+ private:
+  std::variant<std::reference_wrapper<std::unique_ptr<Node, Deleter>>, std::reference_wrapper<size_t>> ref_;
+
  public:
-  using BaseType = std::variant<std::unique_ptr<Node, Deleter>, size_t>;
+  ChildProxy(std::unique_ptr<Node, Deleter>& node) : ref_(node) {}
+  ChildProxy(size_t& idx) : ref_(idx) {}
 
-  Child() = default;
-  Child(BaseType base) : BaseType(std::move(base)) {}
-  explicit Child(std::unique_ptr<Node, Deleter> &&node) : BaseType(std::move(node)) {}
-  Child(size_t idx) : BaseType(idx) {}
-
-  Node *get() {
-    if (std::holds_alternative<std::unique_ptr<Node, Deleter>>(*this)) {
-      return std::get<std::unique_ptr<Node, Deleter>>(*this).get();
+  Node* get() {
+    if (std::holds_alternative<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_)) {
+      return std::get<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_).get().get();
     } else {
       throw std::runtime_error("Cannot get for size_t");
     }
   }
 
-  Node *operator->() { return get(); }
+  Node* operator->() { return get(); }
+
+  operator std::variant<std::unique_ptr<Node, Deleter>, size_t>& () {
+    if (std::holds_alternative<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_)) {
+      return std::move(std::get<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_).get());
+    } else {
+      return std::get<std::reference_wrapper<size_t>>(ref_).get();
+    }
+  }
+
+  operator const std::variant<std::unique_ptr<Node, Deleter>, size_t>& () const {
+    if (std::holds_alternative<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_)) {
+      return std::move(std::get<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_).get());
+    } else {
+      return std::get<std::reference_wrapper<size_t>>(ref_).get();
+    }
+  }
 };
+
 
 template <class Node, class Deleter>
 using children_nodes_type = std::vector<std::unique_ptr<Node, Deleter>>;
@@ -43,9 +59,9 @@ using children_data_type = std::array<size_t, disk_max_nkeys>;
 template <class Node, class Deleter, attr_t disk_max_nkeys>
 struct ChildrenIterTraits {
   using difference_type = attr_t;
-  using value_type = Child<Node, Deleter>;
-  using pointer = value_type *;
-  using reference = value_type &;
+  using value_type = std::variant<std::unique_ptr<Node, Deleter>, size_t>;
+  using pointer = value_type*;
+  using reference = ChildProxy<Node, Deleter>;
   using iterator_category = std::bidirectional_iterator_tag;
   using iterator_concept = iterator_category;
 
@@ -56,9 +72,9 @@ struct ChildrenIterTraits {
 template <class Node, class Deleter, attr_t disk_max_nkeys>
 struct ChildrenConstIterTraits {
   using difference_type = attr_t;
-  using value_type = Child<Node, Deleter>;
-  using pointer = const value_type *;
-  using reference = const value_type &;
+  using value_type = const std::variant<std::unique_ptr<Node, Deleter>, size_t>;
+  using pointer = const value_type*;
+  using reference = const ChildProxy<Node, Deleter>;
   using iterator_category = std::bidirectional_iterator_tag;
   using iterator_concept = iterator_category;
 
@@ -94,7 +110,9 @@ class ChildrenIterator {
   }
 
   ChildrenIterator operator++(int) {
-    return std::visit([](auto &i) { return i++; }, iter_);
+    ChildrenIterator tmp(*this);
+    ++(*this);
+    return tmp;
   }
 
   ChildrenIterator &operator--() {
@@ -103,19 +121,25 @@ class ChildrenIterator {
   }
 
   ChildrenIterator operator--(int) {
-    return std::visit([](auto &i) { return i--; }, iter_);
+    ChildrenIterator tmp(*this);
+    --(*this);
+    return tmp;
   }
 
   ChildrenIterator operator+(difference_type n) const {
-    return std::visit([n](auto &i) { return i + n; }, iter_);
+    return std::visit([n](auto &i) { return ChildrenIterator(i + n); }, iter_);
   }
 
   reference operator*() const {
-    return std::visit([](auto &i) -> reference { return *i; }, iter_);
+    return std::visit([](auto &i) -> reference {
+      return reference(*i);
+    }, iter_);
   }
 
   pointer operator->() const {
-    return std::visit([](auto &i) -> pointer { return &*i; }, iter_);
+    return std::visit([](auto &i) -> pointer {
+      return &(*i);
+    }, iter_);
   }
 
   bool operator==(const ChildrenIterator &other) const { return iter_ == other.iter_; }
@@ -133,6 +157,7 @@ class Children {
  public:
   using iterator = ChildrenIterator<ChildrenIterTraits<Node, Deleter, disk_max_nkeys>>;
   using const_iterator = ChildrenIterator<ChildrenConstIterTraits<Node, Deleter, disk_max_nkeys>>;
+
   using value_type = typename iterator::value_type;
   using reference = typename iterator::reference;
   using const_reference = typename const_iterator::reference;
@@ -167,10 +192,10 @@ class Children {
     if (std::holds_alternative<nodes_type>(data_) && std::holds_alternative<std::unique_ptr<Node, Deleter>>(child)) {
       std::get<nodes_type>(data_).push_back(std::move(std::get<std::unique_ptr<Node, Deleter>>(child)));
     } else if (std::holds_alternative<data_type>(data_) && std::holds_alternative<size_t>(child)) {
-      auto arr = std::get<data_type>(data_);
+      auto& arr = std::get<data_type>(data_);
       for (size_t i = 0; i < arr.size(); i++) {
         if (arr[i] == std::numeric_limits<size_t>::max()) {
-          arr[i] = std::get<size_t>(child);
+          arr[i] = std::move(std::get<size_t>(child));
           return;
         }
       }
@@ -186,8 +211,8 @@ class Children {
       std::get<nodes_type>(data_).pop_back();
       return child;
     } else {
-      auto arr = std::get<data_type>(data_);
-      for (size_t i = arr.size() - 1; i >= 0; i--) {
+      auto& arr = std::get<data_type>(data_);
+      for (size_t i = arr.size(); i-- > 0;) {
         if (arr[i] != std::numeric_limits<size_t>::max()) {
           auto child = arr[i];
           arr[i] = std::numeric_limits<size_t>::max();
@@ -200,33 +225,32 @@ class Children {
 
   void insert(iterator pos, value_type &&child) {
     if (std::holds_alternative<nodes_type>(data_) && std::holds_alternative<std::unique_ptr<Node, Deleter>>(child)) {
-      std::get<nodes_type>(data_).insert(pos, std::move(std::get<std::unique_ptr<Node, Deleter>>(child)));
+      std::get<nodes_type>(data_).insert(std::get<typename iterator::nodes_iter>(pos.iter_), std::move(std::get<std::unique_ptr<Node, Deleter>>(child)));
     } else if (std::holds_alternative<data_type>(data_) && std::holds_alternative<size_t>(child)) {
-      auto arr = std::get<data_type>(data_);
+      auto& arr = std::get<data_type>(data_);
       if (std::get<size_t>(*pos) == std::numeric_limits<size_t>::max()) {
         *pos = child;
         return;
       }
-      iterator it = pos;
-      while (it++ != end()) {
-        if (std::get<size_t>(*pos) == std::numeric_limits<size_t>::max()) {
-            std::shift_right(pos, it, 1);
-        }
-        *pos = child;
-        return;
+      auto it = std::get<typename iterator::data_iter>(pos.iter_);
+      while (it != arr.end() && *it != std::numeric_limits<size_t>::max()) {
+        ++it;
       }
-      throw std::runtime_error("Array full.");
+      if (it == arr.end()) {
+        throw std::runtime_error("Array full.");
+      }
+      std::move_backward(pos.iter_, it, it + 1);
+      *std::get<typename iterator::data_iter>(pos.iter_) = std::get<size_t>(child);
     } else {
       throw std::runtime_error("Cannot insert for incompatible variants.");
     }
-
   }
 
-  value_type &operator[](size_t idx) {
+  reference operator[](size_t idx) {
     if (std::holds_alternative<nodes_type>(data_)) {
-      return std::get<nodes_type>(data_)[idx];
+      return ChildProxy<Node, Deleter>(std::get<nodes_type>(data_)[idx]);
     } else {
-      return std::get<data_type>(data_)[idx];
+      return ChildProxy<Node, Deleter>(std::get<data_type>(data_)[idx]);
     }
   }
 
@@ -263,6 +287,7 @@ class Children {
 
   const_iterator cend() const noexcept { return end(); }
 };
+
 
 }  // namespace children
 
