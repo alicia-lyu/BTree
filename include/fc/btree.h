@@ -2,7 +2,6 @@
 #define __FC_BTREE_H__
 
 #include <cstddef>
-#include <variant>
 #ifndef FC_USE_SIMD
 #define FC_USE_SIMD 0
 #endif // FC_USE_SIMD
@@ -19,6 +18,7 @@
 #endif // FC_USE_SIMD
 
 #include "fc/details.h"
+#include "fc/children.h"
 #include <algorithm>
 #include <bit>
 #include <array>
@@ -171,41 +171,9 @@ requires(Fanout >= 2) class BTreeBase {
     using keys_type =
         std::conditional_t<is_disk_, std::array<V, disk_max_nkeys>,
                            std::vector<V>>;
-    using children_nodes_type = std::vector<std::unique_ptr<Node, Deleter>>;
-    using children_data_type = std::array<size_t, disk_max_nkeys>;
-    
-    class Children: public std::variant<
-            children_nodes_type,
-            children_data_type // branch nodes store pointers to the next level, leaf nodes store data page indexes. Only happens when insert_page is called
-      > {
-    public:
-      void reserve(size_t n) {
-        if (std::holds_alternative<children_nodes_type>(*this)) {
-          std::get<children_nodes_type>(*this).reserve(n);
-        } else {
-          throw std::runtime_error("Cannot reserve for children_data_type");
-        }
-      };
-
-      void push_back(std::unique_ptr<Node, Deleter> &&node) {
-        if (std::holds_alternative<children_nodes_type>(*this)) {
-          std::get<children_nodes_type>(*this).push_back(std::move(node));
-        } else {
-          throw std::runtime_error("Cannot push_back for children_data_type");
-        }
-      };
-
-      std::variant<std::unique_ptr<Node, Deleter>&, size_t&> operator[](size_t idx) {
-        if (std::holds_alternative<children_nodes_type>(*this)) {
-          return std::get<children_nodes_type>(*this)[idx];
-        } else {
-          return std::get<children_data_type>(*this)[idx];
-        }
-      };
-    };
 
     using children_type = std::conditional_t<is_disk_,
-        Children,
+        children::Children<Node, Deleter, disk_max_nkeys>,
         std::vector<std::unique_ptr<Node>>>;
 
     // invariant: except root, t - 1 <= #(key) <= 2 * t - 1
@@ -238,7 +206,7 @@ requires(Fanout >= 2) class BTreeBase {
     Node(Node &&node) = delete;
     Node &operator=(Node &&node) = delete;
 
-    // Has children, whether as nodes or data page indices
+    // Has no children, whether as nodes or data page indices
     [[nodiscard]] bool is_leaf() const noexcept { // All nodes in DBBtree is not leaf, i.e. with children to manage
       return children_.empty();
     }
