@@ -35,15 +35,7 @@ class ChildProxy {
 
   operator std::variant<std::unique_ptr<Node, Deleter>, size_t>& () {
     if (std::holds_alternative<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_)) {
-      return std::move(std::get<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_).get());
-    } else {
-      return std::get<std::reference_wrapper<size_t>>(ref_).get();
-    }
-  }
-
-  operator const std::variant<std::unique_ptr<Node, Deleter>, size_t>& () const {
-    if (std::holds_alternative<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_)) {
-      return std::move(std::get<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_).get());
+      return std::get<std::reference_wrapper<std::unique_ptr<Node, Deleter>>>(ref_).get();
     } else {
       return std::get<std::reference_wrapper<size_t>>(ref_).get();
     }
@@ -67,19 +59,6 @@ struct ChildrenIterTraits {
 
   using nodes_iter = typename children_nodes_type<Node, Deleter>::iterator;
   using data_iter = typename children_data_type<disk_max_nkeys>::iterator;
-};
-
-template <class Node, class Deleter, attr_t disk_max_nkeys>
-struct ChildrenConstIterTraits {
-  using difference_type = attr_t;
-  using value_type = const std::variant<std::unique_ptr<Node, Deleter>, size_t>;
-  using pointer = const value_type*;
-  using reference = const ChildProxy<Node, Deleter>;
-  using iterator_category = std::bidirectional_iterator_tag;
-  using iterator_concept = iterator_category;
-
-  using nodes_iter = typename children_nodes_type<Node, Deleter>::const_iterator;
-  using data_iter = typename children_data_type<disk_max_nkeys>::const_iterator;
 };
 
 template <typename IterTraits>
@@ -156,11 +135,9 @@ class Children {
 
  public:
   using iterator = ChildrenIterator<ChildrenIterTraits<Node, Deleter, disk_max_nkeys>>;
-  using const_iterator = ChildrenIterator<ChildrenConstIterTraits<Node, Deleter, disk_max_nkeys>>;
 
   using value_type = typename iterator::value_type;
   using reference = typename iterator::reference;
-  using const_reference = typename const_iterator::reference;
   using difference_type = typename iterator::difference_type;
   using size_type = size_t;
 
@@ -189,6 +166,23 @@ class Children {
   }
 
   void push_back(value_type &&child) {
+    if (std::holds_alternative<nodes_type>(data_) && std::holds_alternative<std::unique_ptr<Node, Deleter>>(child)) {
+      std::get<nodes_type>(data_).push_back(std::move(std::get<std::unique_ptr<Node, Deleter>>(child)));
+    } else if (std::holds_alternative<data_type>(data_) && std::holds_alternative<size_t>(child)) {
+      auto& arr = std::get<data_type>(data_);
+      for (size_t i = 0; i < arr.size(); i++) {
+        if (arr[i] == std::numeric_limits<size_t>::max()) {
+          arr[i] = std::move(std::get<size_t>(child));
+          return;
+        }
+      }
+      throw std::runtime_error("Array full.");
+    } else {
+      throw std::runtime_error("Cannot push_back for incompatible variants.");
+    }
+  }
+
+  void push_back(const value_type &child) {
     if (std::holds_alternative<nodes_type>(data_) && std::holds_alternative<std::unique_ptr<Node, Deleter>>(child)) {
       std::get<nodes_type>(data_).push_back(std::move(std::get<std::unique_ptr<Node, Deleter>>(child)));
     } else if (std::holds_alternative<data_type>(data_) && std::holds_alternative<size_t>(child)) {
@@ -274,18 +268,6 @@ class Children {
   iterator end() noexcept {
     return std::visit([](auto &children) { return iterator(children.end()); }, data_);
   }
-
-  const_iterator begin() const noexcept {
-    return std::visit([](const auto &children) { return const_iterator(children.cbegin()); }, data_);
-  }
-
-  const_iterator end() const noexcept {
-    return std::visit([](const auto &children) { return const_iterator(children.cend()); }, data_);
-  }
-
-  const_iterator cbegin() const noexcept { return begin(); }
-
-  const_iterator cend() const noexcept { return end(); }
 };
 
 
