@@ -2,9 +2,9 @@
 #define CHILDREN_H
 
 #include <array>
-#include <concepts>
 #include <cstddef>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <variant>
 #include <vector>
@@ -17,6 +17,13 @@ using namespace frozenca;
 template <class Node, class Deleter>
 class Child : public std::variant<std::unique_ptr<Node, Deleter>, size_t> {
  public:
+  using BaseType = std::variant<std::unique_ptr<Node, Deleter>, size_t>;
+
+  Child() = default;
+  Child(BaseType base) : BaseType(std::move(base)) {}
+  explicit Child(std::unique_ptr<Node, Deleter> &&node) : BaseType(std::move(node)) {}
+  Child(size_t idx) : BaseType(idx) {}
+
   Node *get() {
     if (std::holds_alternative<std::unique_ptr<Node, Deleter>>(*this)) {
       return std::get<std::unique_ptr<Node, Deleter>>(*this).get();
@@ -24,6 +31,8 @@ class Child : public std::variant<std::unique_ptr<Node, Deleter>, size_t> {
       throw std::runtime_error("Cannot get for size_t");
     }
   }
+
+  Node *operator->() { return get(); }
 };
 
 template <class Node, class Deleter>
@@ -34,7 +43,7 @@ using children_data_type = std::array<size_t, disk_max_nkeys>;
 template <class Node, class Deleter, attr_t disk_max_nkeys>
 struct ChildrenIterTraits {
   using difference_type = attr_t;
-  using value_type = std::variant<std::unique_ptr<Node, Deleter>, size_t>;
+  using value_type = Child<Node, Deleter>;
   using pointer = value_type *;
   using reference = value_type &;
   using iterator_category = std::bidirectional_iterator_tag;
@@ -47,7 +56,7 @@ struct ChildrenIterTraits {
 template <class Node, class Deleter, attr_t disk_max_nkeys>
 struct ChildrenConstIterTraits {
   using difference_type = attr_t;
-  using value_type = std::variant<std::unique_ptr<Node, Deleter>, size_t>;
+  using value_type = Child<Node, Deleter>;
   using pointer = const value_type *;
   using reference = const value_type &;
   using iterator_category = std::bidirectional_iterator_tag;
@@ -75,12 +84,13 @@ class ChildrenIterator {
  public:
   explicit ChildrenIterator(std::variant<nodes_iter, data_iter> iter) : iter_(iter) {}
 
-  ChildrenIterator() {
-    iter_ = nodes_iter();
-  }
+  ChildrenIterator() : iter_(nodes_iter()) {}
+
+  ChildrenIterator(const ChildrenIterator &other) : iter_(other.iter_) {}
 
   ChildrenIterator &operator++() {
-    return std::visit([](auto &i) { return ++i; }, iter_);
+    std::visit([](auto &i) { ++i; }, iter_);
+    return *this;
   }
 
   ChildrenIterator operator++(int) {
@@ -88,14 +98,23 @@ class ChildrenIterator {
   }
 
   ChildrenIterator &operator--() {
-    return std::visit([](auto &i) { return --i; }, iter_);
+    std::visit([](auto &i) { --i; }, iter_);
+    return *this;
   }
 
-  reference operator*() {
+  ChildrenIterator operator--(int) {
+    return std::visit([](auto &i) { return i--; }, iter_);
+  }
+
+  ChildrenIterator operator+(difference_type n) const {
+    return std::visit([n](auto &i) { return i + n; }, iter_);
+  }
+
+  reference operator*() const {
     return std::visit([](auto &i) -> reference { return *i; }, iter_);
   }
 
-  pointer operator->() {
+  pointer operator->() const {
     return std::visit([](auto &i) -> pointer { return &*i; }, iter_);
   }
 
@@ -108,7 +127,6 @@ template <class Node, class Deleter, attr_t disk_max_nkeys>
 class Children {
   using nodes_type = children_nodes_type<Node, Deleter>;
   using data_type = children_data_type<disk_max_nkeys>;
-  using child_type = Child<Node, Deleter>;
 
   std::variant<nodes_type, data_type> data_;
 
@@ -116,10 +134,12 @@ class Children {
   using iterator = ChildrenIterator<ChildrenIterTraits<Node, Deleter, disk_max_nkeys>>;
   using const_iterator = ChildrenIterator<ChildrenConstIterTraits<Node, Deleter, disk_max_nkeys>>;
   using value_type = typename iterator::value_type;
+  using reference = typename iterator::reference;
+  using const_reference = typename const_iterator::reference;
+  using difference_type = typename iterator::difference_type;
+  using size_type = size_t;
 
-  Children() {
-    data_ = nodes_type();
-  }
+  Children() { data_ = nodes_type(); }
 
   void reserve(size_t n) {
     if (std::holds_alternative<nodes_type>(data_)) {
@@ -129,15 +149,80 @@ class Children {
     }
   }
 
-  void push_back(std::unique_ptr<Node, Deleter> &&node) {
+  size_type size() const {
     if (std::holds_alternative<nodes_type>(data_)) {
-      std::get<nodes_type>(data_).push_back(std::move(node));
+      return std::get<nodes_type>(data_).size();
     } else {
-      throw std::runtime_error("Cannot push_back for children_data_type");
+      size_type count = 0;
+      for (auto &&child : std::get<data_type>(data_)) {
+        if (child != std::numeric_limits<size_t>::max()) {
+          count++;
+        }
+      }
+      return count;
     }
   }
 
-  child_type &operator[](size_t idx) {
+  void push_back(value_type &&child) {
+    if (std::holds_alternative<nodes_type>(data_) && std::holds_alternative<std::unique_ptr<Node, Deleter>>(child)) {
+      std::get<nodes_type>(data_).push_back(std::move(std::get<std::unique_ptr<Node, Deleter>>(child)));
+    } else if (std::holds_alternative<data_type>(data_) && std::holds_alternative<size_t>(child)) {
+      auto arr = std::get<data_type>(data_);
+      for (size_t i = 0; i < arr.size(); i++) {
+        if (arr[i] == std::numeric_limits<size_t>::max()) {
+          arr[i] = std::get<size_t>(child);
+          return;
+        }
+      }
+      throw std::runtime_error("Array full.");
+    } else {
+      throw std::runtime_error("Cannot push_back for incompatible variants.");
+    }
+  }
+
+  value_type pop_back() {
+    if (std::holds_alternative<nodes_type>(data_)) {
+      auto child = std::move(std::get<nodes_type>(data_).back());
+      std::get<nodes_type>(data_).pop_back();
+      return child;
+    } else {
+      auto arr = std::get<data_type>(data_);
+      for (size_t i = arr.size() - 1; i >= 0; i--) {
+        if (arr[i] != std::numeric_limits<size_t>::max()) {
+          auto child = arr[i];
+          arr[i] = std::numeric_limits<size_t>::max();
+          return child;
+        }
+      }
+      throw std::runtime_error("Array empty.");
+    }
+  }
+
+  void insert(iterator pos, value_type &&child) {
+    if (std::holds_alternative<nodes_type>(data_) && std::holds_alternative<std::unique_ptr<Node, Deleter>>(child)) {
+      std::get<nodes_type>(data_).insert(pos, std::move(std::get<std::unique_ptr<Node, Deleter>>(child)));
+    } else if (std::holds_alternative<data_type>(data_) && std::holds_alternative<size_t>(child)) {
+      auto arr = std::get<data_type>(data_);
+      if (std::get<size_t>(*pos) == std::numeric_limits<size_t>::max()) {
+        *pos = child;
+        return;
+      }
+      iterator it = pos;
+      while (it++ != end()) {
+        if (std::get<size_t>(*pos) == std::numeric_limits<size_t>::max()) {
+            std::shift_right(pos, it, 1);
+        }
+        *pos = child;
+        return;
+      }
+      throw std::runtime_error("Array full.");
+    } else {
+      throw std::runtime_error("Cannot insert for incompatible variants.");
+    }
+
+  }
+
+  value_type &operator[](size_t idx) {
     if (std::holds_alternative<nodes_type>(data_)) {
       return std::get<nodes_type>(data_)[idx];
     } else {
@@ -150,7 +235,7 @@ class Children {
       return std::get<nodes_type>(data_).empty();
     } else {
       for (auto &&child : std::get<data_type>(data_)) {
-        if (child != 0) {
+        if (child != std::numeric_limits<size_t>::max()) {
           return false;
         }
       }
