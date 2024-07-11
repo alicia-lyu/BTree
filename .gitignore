@@ -7,3 +7,4 @@ vcpkg
 VERSION.txt
 /build
 /.cache
+bugs
