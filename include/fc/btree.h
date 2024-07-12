@@ -220,14 +220,24 @@ requires(Fanout >= 2) class BTreeBase {
       // It may end up in the parent's keys_ or in higher levels.
       // When we do search_page, search_lb directs us to the copied-up key.
       // Then it will ascend down to a page node, verifying the two occurences of the key.
+      height_ = -1;
       assert(page_index != std::numeric_limits<attr_t>::max()); // sentinel value
       page_index_ = page_index;
     }
 
-    bool validate_page() {
+    V get_page_key() const noexcept {
+      assert(is_page());
+      if constexpr (is_disk_) {
+        return keys_[0];
+      } else {
+        return keys_.front();
+      }
+    }
+
+    bool validate_page() const noexcept {
       if (!is_page()) return false;
       if (size_ != 0) return false;
-      if (height_ != 0) return false;
+      if (height_ != -1) return false;
       if (!children_.empty()) return false;
       if constexpr (is_disk_) {
         if (num_keys_ != 1) return false;
@@ -237,7 +247,7 @@ requires(Fanout >= 2) class BTreeBase {
       return true;
     }
 
-    bool validate() {
+    bool validate() const noexcept {
       return !is_page() || validate_page();
     }
 
@@ -245,7 +255,12 @@ requires(Fanout >= 2) class BTreeBase {
     // page's parent is leaf, while page is not.
     [[nodiscard]] bool is_leaf() const noexcept {
       assert(!is_page());
-      return children_.empty() || children_.front()->is_page();
+      if (children_.empty()) return true;
+      // front() may be nullptr e.g. in the right tree after split
+      for (const auto &child : children_) {
+        if (child && child->is_page()) return true;
+      }
+      return false;
     }
 
     // Has children, including nodes/pages
@@ -547,8 +562,8 @@ public:
     // invariant: node never null
     assert(node);
 
-    // invariant: except root, t - 1 <= #(key) <= 2 * t - 1
-    assert(!node->parent_ ||
+    // invariant: except root and page, t - 1 <= #(key) <= 2 * t - 1
+    assert(!node->parent_ || !node->is_page() ||
            (node->nkeys() >= Fanout - 1 && node->nkeys() <= 2 * Fanout - 1));
 
     // invariant: keys are sorted
@@ -556,8 +571,8 @@ public:
                                   node->keys_.begin() + node->nkeys(), Comp{},
                                   Proj{}));
 
-    // invariant: for internal nodes, t <= #(child) == (#(key) + 1)) <= 2 * t
-    assert(!node->parent_ || node->is_leaf() ||
+    // invariant: for non-page nodes, t <= #(child) == (#(key) + 1)) <= 2 * t
+    assert(!node->parent_ || !node->fathers_nodes_or_pages() ||
            (std::ssize(node->children_) >= Fanout &&
             std::ssize(node->children_) == node->nkeys() + 1 &&
             std::ssize(node->children_) <= 2 * Fanout));
@@ -568,9 +583,11 @@ public:
 
     // invariant: child_0 <= key_0 <= child_1 <= ... <=  key_(N - 1) <=
     // child_N
-    if (!node->is_leaf()) {
+    if (node->is_page()) { 
+      assert(node->validate_page());
+      assert(node->parent_);
+    } else if (!node->is_leaf()) { // internal nodes
       auto num_keys = node->nkeys();
-
       for (attr_t i = 0; i < node->nkeys(); ++i) {
         assert(node->children_[i]);
         assert(!Comp{}(
@@ -592,20 +609,39 @@ public:
       assert(node->height_ == node->children_.back()->height_ + 1);
       num_keys += node->children_.back()->size_;
       assert(node->size_ == num_keys);
-    } else {
+    } else if (node->fathers_nodes_or_pages()) { // leafs with page children
+      assert(node->size_ == node->nkeys());
+      assert(node->children_.size() == (size_t) node->nkeys() + 1);
+      assert(node->height_ == 0);
+      for (attr_t i = 0; i < node->nkeys(); ++i) {
+        assert(node->children_[i]);
+        assert(node->children_[i]->is_page());
+        // page_i_ <= key_i <= page_key_(i + 1)
+        assert(!Comp{}(
+            Proj{}(node->keys_[i]),
+            Proj{}(
+                node->children_[i]->get_page_key())));
+        assert(!Comp{}(Proj{}(node->children_[i + 1]->get_page_key()),
+                       Proj{}(node->keys_[i])));
+        // parent check
+        assert(node->children_[i]->parent_ == node);
+      }
+      assert(node->children_.back());
+      assert(node->children_.back()->is_page());
+      assert(node->children_.back()->parent_ == node);
+    } else { // leaf without children
       assert(node->size_ == node->nkeys());
       assert(node->height_ == 0);
     }
-
     return true;
   }
 
   [[nodiscard]] bool verify() const {
     // Uncomment these lines for testing
-#ifdef _CONTROL_IN_TEST
+// #ifdef _CONTROL_IN_TEST
      assert(begin_ == const_iterator_type(leftmost_leaf(root_.get()), 0));
      assert(verify(root_.get()));
-#endif
+// #endif
     return true;
   }
 
@@ -1965,14 +2001,11 @@ protected:
       std::cerr << "Tree deserialization: key data read error\n";
       return false;
     }
-    if (!is.read(reinterpret_cast<char *>(node->page_index_), sizeof(attr_t))) {
-      std::cerr << "Tree deserialization: page index read error\n";
-      return false;
-    }
+    is >> node->page_index_;
     if (!node->is_page())
       node->size_ = 0; // identical key is copied up in non-page nodes
     else node->size_ = node->num_keys_;
-    if (node_height > 0) {
+    if (node_height >= 0) {
       for (attr_t i = 0; i <= node->num_keys_; ++i) {
         node->children_.push_back(make_node());
         node->children_[i]->parent_ = node;
@@ -2034,11 +2067,8 @@ protected:
       std::cerr << "Tree serialization: key data write error\n";
       return false;
     }
-    if (!os.write(reinterpret_cast<const char *>(node->page_index_), sizeof(attr_t))) {
-      std::cerr << "Tree serialization: page index write error\n";
-      return false;
-    }
-    if (node->height_ > 0) {
+    os << node->page_index_;
+    if (node->fathers_nodes_or_pages()) {
       for (attr_t i = 0; i <= node->num_keys_; ++i) {
         if (!serialize_node(os, node->children_[i].get())) {
           return false;
@@ -2054,7 +2084,7 @@ public:
   friend struct join_helper;
 
 protected:
-  // TODO: Pending page
+  // Splitting to tree_left [begin(), iter_lb) and tree_right [iter_ub, end())
   std::pair<BTreeBase, BTreeBase>
   split_to_two_trees(const_iterator_type iter_lb, const_iterator_type iter_ub) {
     BTreeBase tree_left(alloc_);
@@ -2066,6 +2096,9 @@ protected:
     auto xr = iter_ub.node_;
     std::ranges::reverse(rindices);
 
+    // Traversing from iter_lb.node_ to root.
+    // Most of the nodes stay intact and simply their pointers are moved to new tree
+    // Except those requiring direct splitting, i.e. those on the path / lindices
     while (!lindices.empty()) {
       auto il = lindices.back();
       lindices.pop_back();
@@ -2073,6 +2106,7 @@ protected:
       auto lroot = tree_left.root_.get();
 
       if (xl->is_leaf()) {
+        // send left i keys to lroot: [0, il)
         assert(lroot->size_ == 0);
 
         if (il > 0) {
@@ -2080,20 +2114,26 @@ protected:
             std::memcpy(lroot->keys_.data(), xl->keys_.data(), il * sizeof(V));
             lroot->num_keys_ += il;
           } else {
-            // send left i keys to lroot
             std::ranges::move(xl->keys_ | std::views::take(il),
                               std::back_inserter(lroot->keys_));
           }
           lroot->size_ += il;
+
+          // Also send left i + 1 pages if exist
+          if (xl->fathers_nodes_or_pages()) {
+            std::ranges::move(xl->children_ | std::views::take(il + 1),
+                              std::back_inserter(lroot->children_));
+          }
         }
 
         xl = xl->parent_;
       } else {
         if (il > 0) {
+          // tree_left is xl->children_[i]
           BTreeBase supertree_left(alloc_);
           auto slroot = supertree_left.root_.get();
-          // sltree takes left i - 1 keys, i children
-          // middle key is key[i - 1]
+          // sltree takes left i - 1 keys, [0, i) children
+          // middle key is key[i - 1], mediating sltree and xl->children_[i]
 
           assert(slroot->size_ == 0);
 
@@ -2135,43 +2175,51 @@ protected:
       auto rroot = tree_right.root_.get();
 
       if (xr->is_leaf()) {
+        // send right n - (i + 1) keys to rroot: [ir, n)
         assert(rroot->size_ == 0);
 
         if (ir < xr->nkeys()) {
-          auto immigrants = xr->nkeys() - ir;
+          auto immigrant_key_num = xr->nkeys() - ir;
           if constexpr (is_disk_) {
             std::memcpy(rroot->keys_.data(), xr->keys_.data() + ir,
-                        immigrants * sizeof(V));
-            rroot->num_keys_ += immigrants;
+                        immigrant_key_num * sizeof(V));
+            rroot->num_keys_ += immigrant_key_num;
           } else {
-            // send right n - (i + 1) keys to rroot
             std::ranges::move(xr->keys_ | std::views::drop(ir),
                               std::back_inserter(rroot->keys_));
           }
-          rroot->size_ += immigrants;
+          rroot->size_ += immigrant_key_num;
+
+          // Also send right (n + 1) - (i + 1) pages if exist: [ir + 1, n + 1)
+          // Page ir go with key ir - 1
+          if (xr->fathers_nodes_or_pages()) {
+            std::ranges::move(xr->children_ | std::views::drop(ir + 1),
+                              std::back_inserter(rroot->children_));
+          }
         }
 
         xr = xr->parent_;
       } else {
 
         if (ir + 1 < std::ssize(xr->children_)) {
+          // tree_right is xr->children_[i]
           BTreeBase supertree_right(alloc_);
           auto srroot = supertree_right.root_.get();
-          // srtree takes right n - (i + 1) keys, n - (i + 1) children
-          // middle key is key[i]
+          // srtree takes right n - (i + 1) keys, (n + 1) - (i + 1) children
+          // middle key is key[i], mediating xr->children_[i] and srtree
 
           assert(srroot->size_ == 0);
 
-          auto immigrants = xr->nkeys() - (ir + 1);
+          auto immigrant_key_num = xr->nkeys() - (ir + 1);
           if constexpr (is_disk_) {
             std::memcpy(srroot->keys_.data(), xr->keys_.data() + (ir + 1),
-                        immigrants * sizeof(V));
-            srroot->num_keys_ += immigrants;
+                        immigrant_key_num * sizeof(V));
+            srroot->num_keys_ += immigrant_key_num;
           } else {
             std::ranges::move(xr->keys_ | std::views::drop(ir + 1),
                               std::back_inserter(srroot->keys_));
           }
-          srroot->size_ += immigrants;
+          srroot->size_ += immigrant_key_num;
 
           srroot->children_.reserve(Fanout * 2);
 
@@ -2237,7 +2285,6 @@ public:
   }
 }
 
-  // TODO: Pending page
   template <typename T_>
   requires std::is_constructible_v<V, std::remove_cvref_t<T_>>
   join_helper(BTreeBase<K, V, Fanout, Comp, AllowDup, AllocTemplate> &&tree_left,
@@ -2260,8 +2307,40 @@ public:
   auto size_left = tree_left.root_->size_;
   auto size_right = tree_right.root_->size_;
 
-  if (height_left >= height_right) {
+  if (height_left == height_right) {
     Tree new_tree = std::move(tree_left);
+    // Make a new root and father the two trees
+    auto new_root = tree_left.make_node();
+    new_root->height_ = new_tree.root_->height_ + 1;
+
+    if constexpr (is_disk_) {
+      new_root->keys_[new_root->num_keys_] = mid_value;
+      new_root->num_keys_++;
+    } else {
+      new_root->keys_.push_back(std::move(mid_value));
+    }
+
+    new_root->children_.reserve(Fanout * 2);
+
+    new_tree.root_->parent_ = new_root.get();
+    new_tree.root_->index_ = 0;
+    new_root->children_.push_back(std::move(new_tree.root_));
+
+    tree_right.root_->parent_ = new_root.get();
+    tree_right.root_->index_ = 1;
+    new_root->children_.push_back(std::move(tree_right.root_));
+
+    new_tree.root_ = std::move(new_root);
+    new_tree.try_merge(new_tree.root_.get(), false);
+    new_tree.promote_root_if_necessary();
+    new_tree.root_->size_ = size_left + size_right + 1;
+    assert(new_tree.verify());
+    result_ = std::move(new_tree);
+
+  } else if (height_left > height_right) {
+    Tree new_tree = std::move(tree_left);
+    // Descend to the height equal to the right tree
+    // and make sure the last spot on that level is available
     attr_t curr_height = height_left;
     Node *curr = new_tree.root_.get();
     if (new_tree.root_->is_full()) {
@@ -2289,58 +2368,38 @@ public:
       }
       curr = curr->children_.back().get();
     }
+
     assert(curr_height == height_right);
+
     auto parent = curr->parent_;
-    if (!parent) {
-      // tree_left was empty or height of two trees were the same
-      auto new_root = tree_left.make_node();
-      new_root->height_ = new_tree.root_->height_ + 1;
-
-      if constexpr (is_disk_) {
-        new_root->keys_[new_root->num_keys_] = mid_value;
-        new_root->num_keys_++;
-      } else {
-        new_root->keys_.push_back(std::move(mid_value));
-      }
-
-      new_root->children_.reserve(Fanout * 2);
-
-      new_tree.root_->parent_ = new_root.get();
-      new_tree.root_->index_ = 0;
-      new_root->children_.push_back(std::move(new_tree.root_));
-
-      tree_right.root_->parent_ = new_root.get();
-      tree_right.root_->index_ = 1;
-      new_root->children_.push_back(std::move(tree_right.root_));
-
-      new_tree.root_ = std::move(new_root);
-      new_tree.try_merge(new_tree.root_.get(), false);
-      new_tree.promote_root_if_necessary();
-      new_tree.root_->size_ = size_left + size_right + 1;
+    assert(!parent->is_full());
+    // Move the mediating key to the parent
+    if constexpr (is_disk_) {
+      parent->keys_[parent->num_keys_] = mid_value;
+      parent->num_keys_++;
     } else {
-      if constexpr (is_disk_) {
-        parent->keys_[parent->num_keys_] = mid_value;
-        parent->num_keys_++;
-      } else {
-        parent->keys_.push_back(std::move(mid_value));
-      }
-
-      tree_right.root_->parent_ = parent;
-      tree_right.root_->index_ =
-          static_cast<attr_t>(std::ssize(parent->children_));
-      parent->children_.push_back(std::move(tree_right.root_));
-
-      while (parent) {
-        parent->size_ += (size_right + 1);
-        new_tree.try_merge(parent, false);
-        parent = parent->parent_;
-      }
-      new_tree.promote_root_if_necessary();
+      parent->keys_.push_back(std::move(mid_value));
     }
+
+    // Adjust tree_right's parent-child relationship
+    tree_right.root_->parent_ = parent;
+    tree_right.root_->index_ =
+        static_cast<attr_t>(std::ssize(parent->children_));
+    
+    // Insert tree_right as the right child of the parent[mid_key]
+    parent->children_.push_back(std::move(tree_right.root_));
+
+    while (parent) {
+      parent->size_ += (size_right + 1);
+      new_tree.try_merge(parent, false);
+      parent = parent->parent_;
+    }
+    new_tree.promote_root_if_necessary();
     assert(new_tree.root_->size_ == size_left + size_right + 1);
     assert(new_tree.verify());
     result_ = std::move(new_tree);
   } else {
+
     Tree new_tree = std::move(tree_right);
     attr_t curr_height = height_right;
     Node *curr = new_tree.root_.get();
@@ -2359,7 +2418,6 @@ public:
       curr = new_tree.root_->children_[0].get();
     }
     assert(curr->height_ == height_right);
-
     while (curr && curr_height > height_left) {
       assert(curr->fathers_nodes_or_pages());
       curr_height--;
