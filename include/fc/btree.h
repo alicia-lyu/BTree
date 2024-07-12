@@ -1733,19 +1733,15 @@ public:
         return it; // failed
       } else it = it.first;
     }
-    Node * node = it.node_;
-    attr_t index = it.index_;
-    if (!it.node->is_leaf()) {
-      // first key in leftmost leaf in its right subtree
-      node = leftmost_leaf(it.node->children_[it.index_ + 1].get());
-      index = 0;
-    }
+
+    assert(it.node_->is_leaf());
+
     auto page = make_node();
-    page->index_ = index;
-    page->parent_ = node;
+    page->index_ = it.index_;
+    page->parent_ = it.node_;
     page.transform_to_page(lb_key, page_index);
-    assert(node->children_[index] == nullptr);
-    node->children_.insert(node->children_.begin() + index, std::move(page));
+    assert(std::ssize(it.node_->children_) == it.node_->nkeys()); // short on 1 child
+    it.node_->children_.insert(it.node_->children_.begin() + index, std::move(page));
     return {it, true};
   }
 

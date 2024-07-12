@@ -97,13 +97,13 @@ if (FORCE_USE_SIMD)
     add_definitions(-DFC_USE_SIMD=1)
 endif()
 
-add_library(catch_prereqs INTERFACE
+add_library(catch_prereqs OBJECT
     test/test_statistics.h
     test/test_statistics.cpp
     test/fc_catch2.h
 )
 
-target_link_libraries(catch_prereqs INTERFACE ${CATCH_LIBS_ALIASES})
+target_link_libraries(catch_prereqs PUBLIC ${CATCH_LIBS_ALIASES})
 
 add_executable(fc_tests
     test/unittest.cpp
