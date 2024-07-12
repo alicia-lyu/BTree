@@ -1778,21 +1778,33 @@ public:
   std::conditional_t<AllowDup, iterator_type, std::pair<iterator_type, bool>>
   insert_page(const V &lb_key, size_t page_index) {
     auto it = insert_value(lb_key);
-    if (!AllowDup) {
+    Node * node;
+    attr_t index;
+    if constexpr (!AllowDup) {
       if (!it.second) {
         return it; // failed
-      } else it = it.first;
+      } else {
+        node = it.first.node_;
+        index = it.first.index_;
+      }
+    } else {
+      node = it.node_;
+      index = it.index_;
     }
 
-    assert(it.node_->is_leaf());
+    assert(node->is_leaf()); // guaranteed by logic of insert_value
+
+    // Cannot be a mix of leaves with and without pages
+    // Partial verification of this node
+    assert(std::ssize(node->children_) == node->nkeys()); // short on 1 child
 
     auto page = make_node();
-    page->index_ = it.index_;
-    page->parent_ = it.node_;
-    page.transform_to_page(lb_key, page_index);
-    assert(std::ssize(it.node_->children_) == it.node_->nkeys()); // short on 1 child
-    it.node_->children_.insert(it.node_->children_.begin() + index, std::move(page));
-    return {it, true};
+    page->index_ = index;
+    page->parent_ = node;
+    page->transform_to_page(lb_key, page_index);
+    node->children_.insert(node->children_.begin() + index, std::move(page));
+    if constexpr (AllowDup) return it;
+    else return {it.first, true};
   }
 
   template <typename... Args>
@@ -1890,6 +1902,8 @@ public:
     V value(std::move(*iter));
     return erase_hint(value, hints);
   }
+
+  // LATER: Do we need erase_page at all?
 
   size_type erase(const K &key) {
     if constexpr (AllowDup) {
