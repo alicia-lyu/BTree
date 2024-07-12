@@ -18,7 +18,6 @@
 #endif // FC_USE_SIMD
 
 #include "fc/details.h"
-#include "fc/children.h"
 #include <algorithm>
 #include <bit>
 #include <array>
@@ -172,10 +171,6 @@ requires(Fanout >= 2) class BTreeBase {
         std::conditional_t<is_disk_, std::array<V, disk_max_nkeys>,
                            std::vector<V>>;
 
-    using children_type = std::conditional_t<is_disk_,
-        children::Children<Node, Deleter, disk_max_nkeys>,
-        std::vector<std::unique_ptr<Node>>>;
-
     // invariant: except root, t - 1 <= #(key) <= 2 * t - 1
     // invariant: for root, 0 <= #(key) <= 2 * t - 1
     // invariant: keys are sorted
@@ -190,7 +185,10 @@ requires(Fanout >= 2) class BTreeBase {
     attr_t height_ = 0;
     attr_t num_keys_ =
         0; // number of keys in this node, used only for disk variant
-    children_type children_;
+    std::vector<std::conditional_t<is_disk_, std::unique_ptr<Node, Deleter>,
+                                   std::unique_ptr<Node>>>
+        children_;
+    attr_t page_index_ = std::numeric_limits<attr_t>::max();
 
     Node() { keys_.reserve(disk_max_nkeys); }
 
@@ -206,21 +204,62 @@ requires(Fanout >= 2) class BTreeBase {
     Node(Node &&node) = delete;
     Node &operator=(Node &&node) = delete;
 
-    // Has no children, whether as nodes or data page indices
-    [[nodiscard]] bool is_leaf() const noexcept { // All nodes in DBBtree is not leaf, i.e. with children to manage
-      return children_.empty();
+    void transform_to_page(const V & k_lb, attr_t page_index) noexcept {
+      assert(this->empty());
+      assert(children_.empty());
+      assert(height_ == 0);
+      assert(size_ == 0);
+      assert(!is_page());
+      // Not changed and not empty: parent_, index_
+      // ---only change needed when parent node is modified
+      if constexpr (is_disk_) {
+        keys_[0] = k_lb;
+        num_keys_ = 1;
+      } else keys_.push_back(k_lb);
+      // k_lb must be additionally copied up.
+      // It may end up in the parent's keys_ or in higher levels.
+      // When we do search_page, search_lb directs us to the copied-up key.
+      // Then it will ascend down to a page node, verifying the two occurences of the key.
+      assert(page_index != std::numeric_limits<attr_t>::max()); // sentinel value
+      page_index_ = page_index;
     }
 
-    [[nodiscard]] bool no_children_nodes() const noexcept {
+    bool validate_page() {
+      if (!is_page()) return false;
+      if (size_ != 0) return false;
+      if (height_ != 0) return false;
+      if (!children_.empty()) return false;
       if constexpr (is_disk_) {
-        if (children_.empty()) return true;
-        return std::holds_alternative<size_t>(children_[0]);
+        if (num_keys_ != 1) return false;
       } else {
-        return is_leaf();
+        if (keys_.size() != 1) return false;
       }
+      return true;
+    }
+
+    bool validate() {
+      return !is_page() || validate_page();
+    }
+
+    // Cannot track down to children nodes. May track down to pages.
+    // page's parent is leaf, while page is not.
+    [[nodiscard]] bool is_leaf() const noexcept {
+      assert(!is_page());
+      return children_.empty() || children_.front()->is_page();
+    }
+
+    // Has children, including nodes/pages
+    [[nodiscard]] bool fathers_nodes_or_pages() const noexcept {
+      return !children_.empty();
+    }
+
+    [[nodiscard]] bool is_page() const {
+      return page_index_ != std::numeric_limits<attr_t>::max();
     }
 
     [[nodiscard]] bool is_full() const noexcept {
+      // Used for splitting and inserting
+      assert(!is_page());
       if constexpr (is_disk_) {
         return num_keys_ == 2 * Fanout - 1;
       } else {
@@ -229,6 +268,9 @@ requires(Fanout >= 2) class BTreeBase {
     }
 
     [[nodiscard]] bool can_take_key() const noexcept {
+      // Used for taking keys from sibling etc
+      // Page should never be sibling with another node with keys to transfer
+      assert(!is_page());
       if constexpr (is_disk_) {
         return num_keys_ > Fanout - 1;
       } else {
@@ -237,6 +279,9 @@ requires(Fanout >= 2) class BTreeBase {
     }
 
     [[nodiscard]] bool has_minimal_keys() const noexcept {
+      // Used for erasion
+      if (is_page())
+        return true; // Prevent erasing page node
       if constexpr (is_disk_) {
         return parent_ && num_keys_ == Fanout - 1;
       } else {
@@ -245,6 +290,8 @@ requires(Fanout >= 2) class BTreeBase {
     }
 
     [[nodiscard]] bool empty() const noexcept {
+      // Only called in transform_to_page
+      // page stays empty
       if constexpr (is_disk_) {
         return num_keys_ == 0;
       } else {
@@ -261,6 +308,7 @@ requires(Fanout >= 2) class BTreeBase {
     }
 
     [[nodiscard]] attr_t nkeys() const noexcept {
+      // page stays empty
       if constexpr (is_disk_) {
         return num_keys_;
       } else {
@@ -355,7 +403,7 @@ requires(Fanout >= 2) class BTreeBase {
 
     void increment() noexcept {
       // we don't do past to end() check for efficiency
-      if (!node_->no_children_nodes()) {
+      if (!node_->is_leaf()) {
         node_ = leftmost_leaf(node_->children_[index_ + 1].get());
         index_ = 0;
       } else {
@@ -368,7 +416,7 @@ requires(Fanout >= 2) class BTreeBase {
     }
 
     void decrement() noexcept {
-      if (!node_->no_children_nodes()) {
+      if (!node_->is_leaf()) {
         node_ = rightmost_leaf(node_->children_[index_].get());
         index_ = node_->nkeys() - 1;
       } else if (index_ > 0) {
@@ -528,7 +576,7 @@ public:
 
     // invariant: child_0 <= key_0 <= child_1 <= ... <=  key_(N - 1) <=
     // child_N
-    if (!node->no_children_nodes()) {
+    if (!node->is_leaf()) {
       auto num_keys = node->nkeys();
 
       for (attr_t i = 0; i < node->nkeys(); ++i) {
@@ -635,28 +683,28 @@ public:
   }
 
   static Node *rightmost_leaf(Node *curr) noexcept {
-    while (curr && !curr->no_children_nodes()) {
+    while (curr && !curr->is_leaf()) {
       curr = curr->children_[std::ssize(curr->children_) - 1].get();
     }
     return curr;
   }
 
   static const Node *rightmost_leaf(const Node *curr) noexcept {
-    while (curr && !curr->no_children_nodes()) {
+    while (curr && !curr->is_leaf()) {
       curr = curr->children_[std::ssize(curr->children_) - 1].get();
     }
     return curr;
   }
 
   static Node *leftmost_leaf(Node *curr) noexcept {
-    while (curr && !curr->no_children_nodes()) {
+    while (curr && !curr->is_leaf()) {
       curr = curr->children_[0].get();
     }
     return curr;
   }
 
   static const Node *leftmost_leaf(const Node *curr) noexcept {
-    while (curr && !curr->no_children_nodes()) {
+    while (curr && !curr->is_leaf()) {
       curr = curr->children_[0].get();
     }
     return curr;
@@ -704,23 +752,19 @@ protected:
     node->size_++;
     sibling->size_--;
 
-    if (!node->is_leaf()) {
-      const auto orphan_size = sibling->children_.front()->size_;
+    if (node->fathers_nodes_or_pages()) {
+      const auto orphan_size = sibling->children_.front()->size_; // 0 for child page
       node->size_ += orphan_size;
       sibling->size_ -= orphan_size;
 
-      if (!sibling->no_children_nodes()) {
-        sibling->children_.front()->parent_ = node;
-        sibling->children_.front()->index_ =
-        static_cast<attr_t>(std::ssize(node->children_));
-      }
+      sibling->children_.front()->parent_ = node;
+      sibling->children_.front()->index_ =
+      static_cast<attr_t>(std::ssize(node->children_));
       node->children_.push_back(std::move(sibling->children_.front()));
       std::shift_left(sibling->children_.begin(), sibling->children_.end(), 1);
       sibling->children_.pop_back();
-      if (!sibling->no_children_nodes()) {
-        for (auto &&child : sibling->children_) {
-          child->index_--;
-        }
+      for (auto &&child : sibling->children_) {
+        child->index_--;
       }
     }
   }
@@ -772,19 +816,17 @@ protected:
     node->size_ += n;
     sibling->size_ -= n;
 
-    if (!node->is_leaf()) {
+    if (node->fathers_nodes_or_pages()) {
       // brings n children from sibling
-      if (!sibling->no_children_nodes()) {
-        attr_t orphan_size = 0;
-        attr_t immigrant_index = static_cast<attr_t>(std::ssize(node->children_));
-        for (auto &&immigrant : sibling->children_ | std::views::take(n)) {
-            immigrant->parent_ = node;
-            immigrant->index_ = immigrant_index++;
-            orphan_size += immigrant->size_;
-        }
-        node->size_ += orphan_size;
-        sibling->size_ -= orphan_size;
+      attr_t orphan_size = 0;
+      attr_t immigrant_index = static_cast<attr_t>(std::ssize(node->children_));
+      for (auto &&immigrant : sibling->children_ | std::views::take(n)) {
+          immigrant->parent_ = node;
+          immigrant->index_ = immigrant_index++;
+          orphan_size += immigrant->size_;
       }
+      node->size_ += orphan_size;
+      sibling->size_ -= orphan_size;
 
       std::ranges::move(sibling->children_ | std::views::take(n),
                         std::back_inserter(node->children_));
@@ -793,10 +835,8 @@ protected:
         sibling->children_.pop_back();
       }
       attr_t sibling_index = 0;
-      if (!sibling->no_children_nodes()) {
-        for (auto &&child : sibling->children_) {
-            child->index_ = sibling_index++;
-        }
+      for (auto &&child : sibling->children_) {
+          child->index_ = sibling_index++;
       }
     }
   }
@@ -831,22 +871,19 @@ protected:
     node->size_++;
     sibling->size_--;
 
-    if (!node->is_leaf()) {
-      if (!sibling->no_children_nodes()) {
-        const auto orphan_size = sibling->children_.back()->size_;
-        node->size_ += orphan_size;
-        sibling->size_ -= orphan_size;
+    if (node->fathers_nodes_or_pages()) {
+      const auto orphan_size = sibling->children_.back()->size_;
+      node->size_ += orphan_size;
+      sibling->size_ -= orphan_size;
 
-        sibling->children_.back()->parent_ = node;
-        sibling->children_.back()->index_ = 0;
-      }
+      sibling->children_.back()->parent_ = node;
+      sibling->children_.back()->index_ = 0;
 
       node->children_.insert(node->children_.begin(),
                              std::move(sibling->children_.back()));
       sibling->children_.pop_back();
       for (auto &&child : node->children_ | std::views::drop(1)) {
-        if (node->no_children_nodes())
-          child->index_++;
+        child->index_++;
       }
     }
   }
@@ -901,21 +938,19 @@ protected:
     node->size_ += n;
     sibling->size_ -= n;
 
-    if (!node->is_leaf()) {
+    if (node->fathers_nodes_or_pages()) {
       // brings n children from sibling
-      if (!sibling->no_children_nodes()) {
-        attr_t orphan_size = 0;
-        attr_t immigrant_index = 0;
-        for (auto &&immigrant :
-            sibling->children_ |
-                std::views::drop(std::ssize(sibling->children_) - n)) {
-          immigrant->parent_ = node;
-          immigrant->index_ = immigrant_index++;
-          orphan_size += immigrant->size_;
-        }
-        node->size_ += orphan_size;
-        sibling->size_ -= orphan_size;
+      attr_t orphan_size = 0;
+      attr_t immigrant_index = 0;
+      for (auto &&immigrant :
+          sibling->children_ |
+              std::views::drop(std::ssize(sibling->children_) - n)) {
+        immigrant->parent_ = node;
+        immigrant->index_ = immigrant_index++;
+        orphan_size += immigrant->size_;
       }
+      node->size_ += orphan_size;
+      sibling->size_ -= orphan_size;
 
       std::ranges::move(
           sibling->children_ |
@@ -927,9 +962,7 @@ protected:
         sibling->children_.pop_back();
       }
       attr_t child_index = n;
-      if (node->no_children_nodes()) {
-        child_index = 0;
-      }
+      child_index = 0;
       for (auto &&child : node->children_ | std::views::drop(n)) {
           child->index_ = child_index++;
       }
@@ -978,7 +1011,7 @@ protected:
       auto i = get_lb(key, x);
       if (i < x->nkeys() && key == Proj{}(x->keys_[i])) { // equal? key found
         return const_iterator_type(x, static_cast<attr_t>(i));
-      } else if (x->no_children_nodes()) { // no child, key is not in the tree
+      } else if (x->is_leaf()) { // no child, key is not in the tree
         return cend();
       } else { // search on child between range
         x = x->children_[i].get();
@@ -991,7 +1024,7 @@ protected:
     auto x = root_.get();
     while (x) {
       auto i = get_lb(key, x);
-      if (x->no_children_nodes()) {
+      if (x->is_leaf()) {
         auto it = nonconst_iterator_type(x, static_cast<attr_t>(i));
         // before climbing, if the lower bound is a key not in the leaf node, 
         // it points to the end() of the largest leaf node that's smaller than key (leaf node lower bound)
@@ -1010,7 +1043,7 @@ protected:
     auto x = root_.get();
     while (x) {
       auto i = get_lb(key, x);
-      if (x->no_children_nodes()) {
+      if (x->is_leaf()) {
         auto it = const_iterator_type(x, static_cast<attr_t>(i));
         if (climb) {
           it.climb();
@@ -1027,7 +1060,7 @@ protected:
     auto x = root_.get();
     while (x) {
       auto i = get_ub(key, x);
-      if (x->no_children_nodes()) {
+      if (x->is_leaf()) {
         auto it = nonconst_iterator_type(x, static_cast<attr_t>(i));
         if (climb) {
           it.climb();
@@ -1044,7 +1077,7 @@ protected:
     auto x = root_.get();
     while (x) {
       auto i = get_ub(key, x);
-      if (x->no_children_nodes()) {
+      if (x->is_leaf()) {
         auto it = const_iterator_type(x, static_cast<attr_t>(i));
         if (climb) {
           it.climb();
@@ -1084,17 +1117,15 @@ protected:
                         std::back_inserter(z->keys_));
     }
     auto z_size = z->nkeys();
-    if (!y->is_leaf()) {
+    if (y->fathers_nodes_or_pages()) {
       z->children_.reserve(2 * Fanout);
       // bring right half children from y
       std::ranges::move(y->children_ | std::views::drop(Fanout),
                         std::back_inserter(z->children_));
-      if (!z->no_children_nodes()) {
-        for (auto &&child : z->children_) {
-          child->parent_ = z.get();
-          child->index_ -= Fanout;
-          z_size += child->size_;
-        }
+      for (auto &&child : z->children_) {
+        child->parent_ = z.get();
+        child->index_ -= Fanout;
+        z_size += child->size_;
       }
       while (static_cast<attr_t>(std::ssize(y->children_)) > Fanout) {
         y->children_.pop_back();
@@ -1104,7 +1135,7 @@ protected:
     y->size_ -= (z_size + 1);
 
     x->children_.insert(x->children_.begin() + i + 1, std::move(z));
-    for (auto &&child : x->children_ | std::views::drop(i + 2)) { // x is guaranteed to have children nodes
+    for (auto &&child : x->children_ | std::views::drop(i + 2)) {
       child->index_++;
     }
 
@@ -1130,7 +1161,7 @@ protected:
     assert(y);
     auto i = y->index_;
     Node *x = y->parent_;
-    assert(x && y == x->children_[i].get() && !x->is_leaf() && i >= 0 &&
+    assert(x && y == x->children_[i].get() && x->fathers_nodes_or_pages() && i >= 0 &&
            i + 1 < std::ssize(x->children_));
     auto sibling = x->children_[i + 1].get();
     assert(y->nkeys() + sibling->nkeys() <= 2 * Fanout - 2);
@@ -1150,14 +1181,13 @@ protected:
     }
 
     // bring children of child[i + 1]
-    if (!y->is_leaf()) {
+    if (y->fathers_nodes_or_pages()) {
       attr_t immigrant_index = static_cast<attr_t>(std::ssize(y->children_));
-      if (!sibling.no_children_nodes()) {
-        for (auto &&child : sibling->children_) {
-          child->parent_ = y;
-          child->index_ = immigrant_index++;
-          immigrated_size += child->size_;
-      }}
+      for (auto &&child : sibling->children_) {
+        child->parent_ = y;
+        child->index_ = immigrant_index++;
+        immigrated_size += child->size_;
+      }
       std::ranges::move(sibling->children_, std::back_inserter(y->children_));
     }
     y->size_ += immigrated_size + 1;
@@ -1189,6 +1219,7 @@ protected:
 
   // (left side) merge child[0], child[1] if necessary, and propagate to
   // possibly the root for right side it's child[n - 2], child[n - 1]
+  // Not merging pages
   void try_merge(Node *x, bool left_side) {
     assert(x && !x->is_leaf());
     if (std::ssize(x->children_) < 2) {
@@ -1261,10 +1292,21 @@ protected:
       curr = curr->parent_;
     }
 
+    // // Only possible when fathering pages
+    // // Empty up the child spot right after the inserted key (i+1)
+    // // So that a page would be placed there 
+    // if (node->fathers_nodes_or_pages()) {
+    //   node->children_.insert(node->children_.begin() + i + 1, nullptr);
+    //   // BUG: Cannot initialize unique_ptr with custom deleter with nullptr
+    // }
+
     assert(verify());
     return iter;
   }
 
+  // Newly inserted value always end up in a leaf node
+  // In the scenario that a push-up is needed, it is guaranteed
+  // that an existing key is pushed up.
   template <typename T>
   iterator_type insert_ub(T &&key) requires(
       AllowDup &&std::is_same_v<std::remove_cvref_t<T>, V>) {
@@ -1585,28 +1627,29 @@ public:
     return const_iterator_type(find_upper_bound(key));
   }
 
-  std::pair<iterator_type, size_t> find_page(const K& key_lb) {
+  std::pair<iterator_type, Node *> find_page(const K& key_lb) {
     const_iterator_type it;
-    size_t page_index;
-    std::tie(it, page_index) = find_page(key_lb);
-    return {const_iterator_type(it), page_index};
+    Node * page;
+    std::tie(it, page) = find_page(key_lb);
+    return {const_iterator_type(it), page};
   }
 
-  std::pair<const_iterator_type, size_t> find_page(const K& key_lb) const {
+  std::pair<const_iterator_type, Node *> find_page(const K& key_lb) const {
     auto it = find_lower_bound(key_lb);
     if (it == cend()) {
       return {it, std::numeric_limits<size_t>::max()};
     }
     auto node = it.node_;
     auto index = it.index_;
-    if (!node->no_children_nodes()) {
+    if (!node->is_leaf()) {
       node = leftmost_leaf(node->children_[index + 1].get());
       index = 0;
     } else {
       ++index; // right child
     }
-    assert(node->children_.size() > index);
-    return {it, node->children_[index].size()};
+    auto page = node->children_[index];
+    assert(page.validate_page());
+    return {it, page};
   }
 
   std::ranges::subrange<iterator_type> equal_range(const K &key) {
@@ -1704,18 +1747,20 @@ public:
         return it; // failed
       } else it = it.first;
     }
-    Node node = it.node_;
+    Node * node = it.node_;
     attr_t index = it.index_;
-    if (!it.node->no_children_nodes()) {
+    if (!it.node->is_leaf()) {
       // first key in leftmost leaf in its right subtree
       node = leftmost_leaf(it.node->children_[it.index_ + 1].get());
       index = 0;
     }
-    // Guaranteed no_children_nodes
-    if (node.is_leaf()) // uninitialized
-      node.children_ = std::array<size_t, disk_max_nkeys>{};
-    node->children_[index](page_index);
-    assert(verify());
+    auto page = make_node();
+    page->index_ = index;
+    page->parent_ = node;
+    page.transform_to_page(lb_key, page_index);
+    assert(node->children_[index] == nullptr);
+    node->children_.insert(node->children_.begin() + index, std::move(page));
+    return {it, true};
   }
 
   template <typename... Args>
@@ -1747,7 +1792,7 @@ public:
       auto i = get_lb(key, x);
       if (i < x->nkeys() && key == Proj{}(x->keys_[i])) {
         return iterator_type(x, static_cast<attr_t>(i))->second;
-      } else if (x->no_children_nodes()) {
+      } else if (x->is_leaf()) {
         V val{std::move(key), {}};
         return insert_leaf(x, static_cast<attr_t>(i), std::move(val))->second;
       } else {
@@ -1938,7 +1983,13 @@ protected:
       std::cerr << "Tree deserialization: key data read error\n";
       return false;
     }
-    node->size_ = node->num_keys_;
+    if (!is.read(reinterpret_cast<char *>(node->page_index_), sizeof(attr_t))) {
+      std::cerr << "Tree deserialization: page index read error\n";
+      return false;
+    }
+    if (!node->is_page())
+      node->size_ = 0; // identical key is copied up in non-page nodes
+    else node->size_ = node->num_keys_;
     if (node_height > 0) {
       for (attr_t i = 0; i <= node->num_keys_; ++i) {
         node->children_.push_back(make_node());
@@ -1947,18 +1998,6 @@ protected:
                               node_height - 1)) {
           return false;
         }
-      }
-    } else {
-      bool page_ref_existence = false;
-      if (!is.read(reinterpret_cast<char *>(&page_ref_existence), 1)) {
-        std::cerr << "Tree deserialization: page refs existence read error\n";
-        return false;
-      }
-      if (page_ref_existence) 
-        if (!is.read(reinterpret_cast<char *>(node->children_.data()),
-              (node->num_keys_ + 1) * sizeof(std::size_t))) {
-        std::cerr << "Tree deserialization: page data read error\n";
-        return false;
       }
     }
     if (node->parent_) {
@@ -2013,21 +2052,13 @@ protected:
       std::cerr << "Tree serialization: key data write error\n";
       return false;
     }
+    if (!os.write(reinterpret_cast<const char *>(node->page_index_), sizeof(attr_t))) {
+      std::cerr << "Tree serialization: page index write error\n";
+      return false;
+    }
     if (node->height_ > 0) {
       for (attr_t i = 0; i <= node->num_keys_; ++i) {
         if (!serialize_node(os, node->children_[i].get())) {
-          return false;
-        }
-      }
-    } else {
-      if (!os.write(reinterpret_cast<const char *>(node->is_leaf()),
-                    1)) {
-        std::cerr << "Tree serialization: page refs existence write error\n";
-        return false;
-      }
-      if (!node->is_leaf()) {
-        if (!os.write(reinterpret_cast<const char *>(node->children_), (node->num_keys_ + 1) * sizeof(std::size_t))) {
-          std::cerr << "Tree serialization: page refs write error\n";
           return false;
         }
       }
@@ -2270,7 +2301,7 @@ public:
     assert(curr->height_ == height_left);
 
     while (curr && curr_height > height_right) {
-      assert(!curr->is_leaf());
+      assert(curr->fathers_nodes_or_pages());
       curr_height--;
 
       if (curr->children_.back()->is_full()) {
@@ -2350,7 +2381,7 @@ public:
     assert(curr->height_ == height_right);
 
     while (curr && curr_height > height_left) {
-      assert(!curr->is_leaf());
+      assert(curr->fathers_nodes_or_pages());
       curr_height--;
 
       if (curr->children_.front()->is_full()) {

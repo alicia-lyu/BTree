@@ -66,7 +66,6 @@ else()
 endif()
 
 add_library(BTree INTERFACE
-    include/fc/children.h
     include/fc/comp.h 
     include/fc/disk_fixed_alloc.h 
     include/fc/mmfile.h 
