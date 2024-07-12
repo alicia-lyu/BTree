@@ -225,6 +225,17 @@ requires(Fanout >= 2) class BTreeBase {
       page_index_ = page_index;
     }
 
+    void transform_to_placeholder_page() noexcept {
+      assert(empty());
+      assert(children_.empty());
+      assert(height_ == 0);
+      assert(size_ == 0);
+      assert(!is_page());
+      height_ = -1;
+      page_index_ = 0;
+      // characteristic: keys are empty
+    }
+
     V get_page_key() const noexcept {
       assert(is_page());
       if constexpr (is_disk_) {
@@ -247,8 +258,21 @@ requires(Fanout >= 2) class BTreeBase {
       return true;
     }
 
+    [[nodiscard]] bool validate_placeholder_page() const {
+      if (!is_page()) return false;
+      if (size_ != 0) return false;
+      if (height_ != -1) return false;
+      if (!children_.empty()) return false;
+      if constexpr (is_disk_) {
+        if (num_keys_ != 0) return false;
+      } else {
+        if (!keys_.empty()) return false;
+      }
+      return true;
+    }
+
     bool validate() const noexcept {
-      return !is_page() || validate_page();
+      return !is_page() || validate_page() || validate_placeholder_page();
     }
 
     // Cannot track down to children nodes. May track down to pages.
@@ -257,15 +281,19 @@ requires(Fanout >= 2) class BTreeBase {
       assert(!is_page());
       if (children_.empty()) return true;
       // front() may be nullptr e.g. in the right tree after split
-      for (const auto &child : children_) {
-        if (child && child->is_page()) return true;
-      }
-      return false;
+      else return fathers_page();
     }
 
     // Has children, including nodes/pages
     [[nodiscard]] bool fathers_nodes_or_pages() const noexcept {
       return !children_.empty();
+    }
+
+    [[nodiscard]] bool fathers_page() const noexcept {
+      for (const auto &child : children_) {
+        if (child && child->is_page()) return true;
+      }
+      return false;
     }
 
     [[nodiscard]] bool is_page() const {
@@ -592,7 +620,7 @@ public:
     // invariant: child_0 <= key_0 <= child_1 <= ... <=  key_(N - 1) <=
     // child_N
     if (node->is_page()) { 
-      assert(node->validate_page());
+      assert(node->validate());
       assert(node->parent_);
     } else if (!node->is_leaf()) { // internal nodes
       auto num_keys = node->nkeys();
@@ -618,6 +646,10 @@ public:
       num_keys += node->children_.back()->size_;
       assert(node->size_ == num_keys);
     } else if (node->fathers_nodes_or_pages()) { // leafs with page children
+      if (node->children_.size() == (size_t) node->nkeys()) // page node is yet to be inserted, deferring checking
+      {
+        return true;
+      }
       assert(node->size_ == node->nkeys());
       assert(node->children_.size() == (size_t) node->nkeys() + 1);
       assert(node->height_ == 0);
@@ -1664,16 +1696,14 @@ public:
   }
 
   std::pair<iterator_type, Node *> find_page(const K& key_lb) {
-    const_iterator_type it;
-    Node * page;
-    std::tie(it, page) = find_page(key_lb);
-    return {const_iterator_type(it), page};
+    auto const_result = static_cast<const std::decay_t<decltype(*this)>*>(this)->find_page(key_lb);
+    return {iterator_type(const_result.first), const_cast<Node*>(const_result.second)};
   }
 
   std::pair<const_iterator_type, Node *> find_page(const K& key_lb) const {
     auto it = find_lower_bound(key_lb);
     if (it == cend()) {
-      return {it, std::numeric_limits<size_t>::max()};
+      return {cend(), nullptr};
     }
     auto node = it.node_;
     auto index = it.index_;
@@ -1683,8 +1713,8 @@ public:
     } else {
       ++index; // right child
     }
-    auto page = node->children_[index];
-    assert(page.validate_page());
+    Node * page = node->children_[index].get();
+    assert(page->validate_page());
     return {it, page};
   }
 
@@ -1777,7 +1807,18 @@ public:
 
   std::conditional_t<AllowDup, iterator_type, std::pair<iterator_type, bool>>
   insert_page(const V &lb_key, size_t page_index) {
+
+    // The first insert_page call:
+    // Occupy the leftmost child, as it will never be filled.
+    if (size() == 0) {
+      assert(!root_->fathers_nodes_or_pages());
+      auto page = make_node();
+      page->transform_to_placeholder_page();
+      root_->children_.push_back(std::move(page));
+    }
+
     auto it = insert_value(lb_key);
+
     Node * node;
     attr_t index;
     if constexpr (!AllowDup) {
@@ -2331,6 +2372,11 @@ public:
   if (tree_left.alloc_ != tree_right.alloc_) {
     throw std::invalid_argument("Join() two allocators are different\n");
   }
+
+  // Page existence must be the same for both trees
+  Node * leftmost_leaf_left = tree_left.leftmost_leaf(tree_left.root_.get());
+  Node * leftmost_leaf_right = tree_right.leftmost_leaf(tree_right.root_.get());
+  assert(leftmost_leaf_left->fathers_page() == leftmost_leaf_right->fathers_page());
 
   auto height_left = tree_left.root_->height_;
   auto height_right = tree_right.root_->height_;
