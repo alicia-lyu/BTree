@@ -72,13 +72,13 @@ int main() {
   assert(page.verify_order());
   assert(inserted == TestPage::RECORD_COUNT);
 
-  TestPage right_page(mmap_file, PAGE_SIZE);
+  TestPage * right_page = new TestPage(mmap_file, PAGE_SIZE);
   page.split_with(right_page);
-  assert(page.size() + right_page.size() == TestPage::RECORD_COUNT);
+  assert(page.size() + right_page->size() == TestPage::RECORD_COUNT);
   assert(page.verify_order());
-  assert(right_page.verify_order());
-  assert(page.size() == right_page.size() || page.size() + 1 == right_page.size());
+  assert(right_page->verify_order());
+  assert(page.size() == right_page->size() || page.size() + 1 == right_page->size());
   auto left_max = page.max();
-  auto right_min = right_page.min();
-  assert(std::memcmp(left_max.data(), right_min.data(), RECORD_SIZE) <= 0);
+  auto right_min = right_page->min();
+  assert(std::memcmp(left_max.get_record()->data(), right_min.get_record()->data(), RECORD_SIZE) <= 0);
 }
