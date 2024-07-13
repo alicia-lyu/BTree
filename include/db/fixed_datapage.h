@@ -4,7 +4,11 @@
 #include "datapage.h"
 #include <array>
 #include <bitset>
+#include <cstdint>
+#include <filesystem>
 #include <iostream>
+#include <fstream>
+#include <stdexcept>
 
 template <size_t PAGE_SIZE, size_t RECORD_SIZE, size_t KEY_SIZE>
 class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char, RECORD_SIZE>, std::array<unsigned char, KEY_SIZE>> {
@@ -24,21 +28,39 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
  protected:
   std::bitset<RECORD_COUNT>* bitmap_;  // 0 for free, 1 for occupied
   RecordData* record_data_;
+  std::filesystem::path path_;
+  uintmax_t page_offset_;
 
  public:
-  // New constructor to use memory-mapped file directly
-  FixedRecordDataPage(MMapFile& mmap_file, uintmax_t file_offset)
-      : Base(mmap_file, file_offset),
-        bitmap_(new(this->get_mmap_ptr(mmap_file, file_offset)) std::bitset<RECORD_COUNT>()),
-        record_data_(new(this->get_mmap_ptr(mmap_file, file_offset, sizeof(std::bitset<RECORD_COUNT>))) RecordData()) {
-    assert(file_offset % PAGE_SIZE == 0);
-    std::cout << "FixedRecordDataPage constructed at " << file_offset << ". Page size: " << PAGE_SIZE << ". Record size: " << RECORD_SIZE
-              << ". Key size: " << KEY_SIZE << ". Record count: " << RECORD_COUNT << "\n";
+  FixedRecordDataPage(std::filesystem::path p, uintmax_t file_offset) {
+    std::ifstream file(p, std::ios::binary | std::ios::in);
+    file.seekg(file_offset);
+    if (!file.read(reinterpret_cast<char*>(&this->next_page_offset_), sizeof(uintmax_t))) {
+      throw std::runtime_error("Failed to read next page offset");
+    }
+    if (!file.read(reinterpret_cast<char*>(bitmap_), sizeof(std::bitset<RECORD_COUNT>))) {
+      throw std::runtime_error("Failed to read bitmap");
+    }
+    if (!file.read(reinterpret_cast<char*>(record_data_), DATA_SIZE)) {
+      throw std::runtime_error("Failed to read record data");
+    }
   }
 
   FixedRecordDataPage() : bitmap_(std::make_unique<std::bitset<RECORD_COUNT>>()), record_data_(std::make_unique<RecordData>(RECORD_COUNT)) {}
 
-  ~FixedRecordDataPage() {}
+  ~FixedRecordDataPage() {
+    std::ofstream file(path_, std::ios::binary | std::ios::out);
+    file.seekp(page_offset_);
+    if (!file.write(reinterpret_cast<char*>(&this->next_page_offset_), sizeof(uintmax_t))) {
+        throw std::runtime_error("Failed to write next page offset");
+    }
+    if (!file.write(reinterpret_cast<char*>(bitmap_), sizeof(std::bitset<RECORD_COUNT>))) {
+        throw std::runtime_error("Failed to write bitmap");
+    }
+    if (!file.write(reinterpret_cast<char*>(record_data_), DATA_SIZE)) {
+        throw std::runtime_error("Failed to write record data");
+    }
+  }
 
   size_t size() { return bitmap_->count(); }
 
@@ -68,7 +90,6 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   }
 
  public:
-
   using typename Base::iterator_type;
 
   iterator_type begin() override { return iterator_type(this, 0); }
@@ -284,7 +305,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   // Otherwise, unexpected behavior when the bitmap is skewed.
   Key split_with(Base* right_sibling) override {
     // Perform a dynamic_cast to check if right_sibling is of type Self
-    Self* right_sibling_self = dynamic_cast<Self *>(right_sibling);
+    Self* right_sibling_self = dynamic_cast<Self*>(right_sibling);
     assert(right_sibling_self && "right_sibling is not of the correct type");
 
     assert(right_sibling_self->bitmap_->none());

@@ -75,7 +75,7 @@ class DataPage {
     size_t index_;
     using iterator_category = std::bidirectional_iterator_tag;
     using value_type = Record;
-    using difference_type = size_t;
+    using difference_type = std::ptrdiff_t;
     using pointer = value_type*;
     using reference = value_type&;
 
@@ -144,12 +144,26 @@ class DataPage {
   virtual std::optional<iterator_type> erase(iterator_type it) = 0;
   virtual std::optional<iterator_type> erase(const Record& record) = 0;
 
-  virtual Key split_with(DataPage<PAGE_SIZE, Record, Key> * right_sibling) = 0;
+  virtual Key split_with(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
 
   virtual bool verify_order() = 0;
 
   virtual iterator_type max() = 0;
   virtual iterator_type min() = 0;
+
+  // LATER: STL-like interface
+  // using value_type = Record;
+  // using reference = value_type&;
+  // using const_reference = const value_type&;
+  // using iterator = Iterator;
+  // using const_iterator = const Iterator;
+  // using size_type = size_t;
+  // using difference_type = std::ptrdiff_t;
+  // virtual size_type size() const = 0;
+  // virtual size_type max_size() const = 0;
+  // virtual bool empty() const = 0;
+  // virtual void clear() = 0;
+  // virtual void swap(DataPage& other) = 0;
 };
 
 // Fixed-length key, variable-length value
