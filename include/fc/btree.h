@@ -231,9 +231,15 @@ requires(Fanout >= 2) class BTreeBase {
       assert(height_ == 0);
       assert(size_ == 0);
       assert(!is_page());
+      if constexpr (is_disk_) {
+        num_keys_ = 1;
+        keys_[0] = std::numeric_limits<V>::min();
+      } else {
+        keys_.push_back(std::numeric_limits<V>::min());
+      }
       height_ = -1;
-      page_index_ = 0;
-      // characteristic: keys are empty
+      page_index_ = std::numeric_limits<attr_t>::min();
+      assert(validate_page());
     }
 
     V get_page_key() const noexcept {
@@ -258,21 +264,8 @@ requires(Fanout >= 2) class BTreeBase {
       return true;
     }
 
-    [[nodiscard]] bool validate_placeholder_page() const {
-      if (!is_page()) return false;
-      if (size_ != 0) return false;
-      if (height_ != -1) return false;
-      if (!children_.empty()) return false;
-      if constexpr (is_disk_) {
-        if (num_keys_ != 0) return false;
-      } else {
-        if (!keys_.empty()) return false;
-      }
-      return true;
-    }
-
     bool validate() const noexcept {
-      return !is_page() || validate_page() || validate_placeholder_page();
+      return !is_page() || validate_page();
     }
 
     // Cannot track down to children nodes. May track down to pages.
@@ -298,6 +291,10 @@ requires(Fanout >= 2) class BTreeBase {
 
     [[nodiscard]] bool is_page() const {
       return page_index_ != std::numeric_limits<attr_t>::max();
+    }
+
+    [[nodiscard]] bool is_placeholder_page() const {
+      return page_index_ == std::numeric_limits<attr_t>::min();
     }
 
     [[nodiscard]] bool is_full() const noexcept {
@@ -437,7 +434,7 @@ requires(Fanout >= 2) class BTreeBase {
     }
 
     void dig() noexcept {
-      while (!node_->children_.empty()) {
+      while (!node_->is_leaf()) {
         auto id = index_;
         index_ = ssize(node_->children_[id]->keys_);
         node_ = node_->children_[id].get();
@@ -607,8 +604,8 @@ public:
                                   node->keys_.begin() + node->nkeys(), Comp{},
                                   Proj{}));
 
-    // invariant: for non-page nodes, t <= #(child) == (#(key) + 1)) <= 2 * t
-    assert(!node->parent_ || !node->fathers_nodes_or_pages() ||
+    // invariant: for internal nodes, t <= #(child) == (#(key) + 1)) <= 2 * t
+    assert(!node->parent_ || node->is_leaf() ||
            (std::ssize(node->children_) >= Fanout &&
             std::ssize(node->children_) == node->nkeys() + 1 &&
             std::ssize(node->children_) <= 2 * Fanout));
@@ -1097,7 +1094,7 @@ protected:
         // before climbing, if the lower bound is a key not in the leaf node, 
         // it points to the end() of the largest leaf node that's smaller than key (leaf node lower bound)
         if (climb) {
-          it.climb(); //
+          it.climb();
         }
         return it;
       } else {
@@ -1807,13 +1804,14 @@ public:
 
   std::conditional_t<AllowDup, iterator_type, std::pair<iterator_type, bool>>
   insert_page(const V &lb_key, size_t page_index) {
-
     // The first insert_page call:
     // Occupy the leftmost child, as it will never be filled.
     if (size() == 0) {
       assert(!root_->fathers_nodes_or_pages());
       auto page = make_node();
       page->transform_to_placeholder_page();
+      page->parent_ = root_.get();
+      page->index_ = 0;
       root_->children_.push_back(std::move(page));
     }
 
@@ -1840,10 +1838,10 @@ public:
     assert(std::ssize(node->children_) == node->nkeys()); // short on 1 child
 
     auto page = make_node();
-    page->index_ = index;
+    page->index_ = index + 1;
     page->parent_ = node;
     page->transform_to_page(lb_key, page_index);
-    node->children_.insert(node->children_.begin() + index, std::move(page));
+    node->children_.insert(node->children_.begin() + index + 1, std::move(page));
     if constexpr (AllowDup) return it;
     else return {it.first, true};
   }
