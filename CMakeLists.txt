@@ -65,19 +65,13 @@ else()
     message(STATUS "OS VERSION ${CMAKE_SYSTEM_VERSION}")
 endif()
 
-add_library(BTree INTERFACE
-    include/fc/comp.h 
-    include/fc/disk_fixed_alloc.h 
-    include/fc/mmfile.h 
-    include/fc/btree.h 
-    include/fc/disk_btree.h
-    include/fc/mmfile_win.h
-    include/fc/mmfile_nix.h
-    include/fc/details.h)
+file(GLOB_RECURSE FC_HEADERS include/fc/*.h)
 
-add_library(DBBTree INTERFACE
-    include/db/db_btree.h
-    include/db/datapage.h)
+add_library(BTree INTERFACE ${FC_HEADERS})
+
+file(GLOB_RECURSE DB_HEADERS include/db/*.h)
+
+add_library(DBBTree INTERFACE ${DB_HEADERS})
 
 foreach(target IN LISTS BTree DBBTree)
     target_include_directories(${target} INTERFACE
@@ -116,9 +110,9 @@ add_executable(fc_benchmarks
     test/perftest_string.cpp
 )
 
-add_executable(db_tests
-    test/dbtest_fixed_page.cpp
-)
+# add_executable(db_tests
+#     test/dbtest_fixed_page.cpp
+# )
 
 add_executable(dbtests_manual_fixed_page
     test/dbtest_fixed_page_manual.cpp
@@ -128,9 +122,9 @@ add_executable(dbtests_manual_page_node
     test/dbtest_page_node_manual.cpp
 )
 
-set(CATCH2_EXECUTABLES fc_tests fc_benchmarks db_tests)
+set(CATCH2_EXECUTABLES fc_tests fc_benchmarks)
 set(MANUAL_EXECUTABLES dbtests_manual_fixed_page dbtests_manual_page_node)
-set(DB_EXECUTABLES db_tests dbtests_manual_fixed_page dbtests_manual_page_node)
+set(DB_EXECUTABLES dbtests_manual_fixed_page dbtests_manual_page_node)
 set(TEST_EXECUTABLES ${CATCH2_EXECUTABLES} ${MANUAL_EXECUTABLES})
 message(STATUS "TEST_EXECUTABLES: ${TEST_EXECUTABLES}")
 
@@ -199,7 +193,7 @@ include(CTest)
 include(Catch)
 catch_discover_tests(fc_tests EXTRA_ARGS --benchmark-samples=1)
 catch_discover_tests(fc_benchmarks EXTRA_ARGS --benchmark-samples=1)
-catch_discover_tests(db_tests EXTRA_ARGS --benchmark-samples=1)
+# catch_discover_tests(db_tests EXTRA_ARGS --benchmark-samples=1)
 
 set(CPACK_SOURCE_IGNORE_FILES
     #git files

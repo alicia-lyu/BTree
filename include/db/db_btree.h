@@ -1,7 +1,7 @@
 #ifndef DB_BTREE_H
 #define DB_BTREE_H
 
-#include "db/datapage.h"
+#include "db/fixed_datapage.h"
 #include "fc/btree.h"
 #include "fc/mmfile_nix.h"  // WindowsOS not supported
 #include "fc/disk_fixed_alloc.h"
