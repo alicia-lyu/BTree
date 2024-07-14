@@ -3,13 +3,13 @@
 #include <filesystem>
 #include <cassert>
 #include <string>
+#include <random>
+#include <vector>
+#include <numeric>
 
 #include "db/db_btree.h"
 #include "db/buffer_pool.h"
 #include "db/fixed_datapage.h"
-
-// Assuming FixedRecordDataPage implementation is already provided
-// and all required methods are implemented.
 
 constexpr size_t PAGE_SIZE = 4096;
 constexpr size_t RECORD_SIZE = 200;
@@ -156,12 +156,74 @@ void test_page_serialization() {
     std::cout << "Serialization and deserialization test passed." << std::endl;
 }
 
+// Test to validate record erasure in FixedRecordDataPage
+void test_DataPage_erase() {
+    std::filesystem::path page_path = "./test_page.bin";
+    uintmax_t file_offset = 0;
+
+    std::filesystem::remove(page_path);
+
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset);
+
+    // Insert records to fill up the page
+    for (int i = 1; i <= 50; ++i) {
+        page.insert(create_sample_record(i));
+    }
+
+    // Erase half the records
+    for (int i = 1; i <= 25; ++i) {
+        auto it = page.search(create_sample_record(i));
+        page.erase(it);
+    }
+
+    // Verify remaining records
+    for (int i = 26; i <= 50; ++i) {
+        auto it = page.search(create_sample_record(i));
+        assert(it != page.end());
+    }
+
+    std::cout << "DataPage erase test passed." << std::endl;
+}
+
+// Test to validate record erasure in DBBTree
+void test_DBBTree_erase() {
+    std::filesystem::path pages_path = "./pages.bin";
+    std::filesystem::path btree_path = "./btree.bin";
+
+    std::filesystem::remove(pages_path);
+    std::filesystem::remove(btree_path);
+
+    DBBTree<false, 4, FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>> btree(pages_path, btree_path, MAX_PAGES);
+
+    // Insert multiple records
+    for (int i = 1; i <= 100; ++i) {
+        auto [it, inserted] = btree.insert(create_sample_record(i));
+        assert(inserted == true);
+    }
+
+    // Erase some records to trigger page merging and borrowing
+    for (int i = 1; i <= 25; ++i) {
+        auto it = btree.search(create_sample_record(i));
+        btree.erase(it);
+    }
+
+    // Verify remaining records
+    for (int i = 26; i <= 100; ++i) {
+        auto it = btree.search(create_sample_record(i));
+        assert(it != btree.end());
+    }
+
+    std::cout << "DBBTree erase test passed." << std::endl;
+}
+
 int main() {
     test_BufferPool();
     test_page_serialization();
     test_DBBTree_initialization();
     test_DBBTree_insert_search();
     test_DBBTree_iterator();
+    test_DataPage_erase();
+    test_DBBTree_erase();
     std::cout << "All tests passed successfully." << std::endl;
     return 0;
 }

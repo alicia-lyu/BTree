@@ -11,7 +11,6 @@
 #include <limits>
 #include <variant>
 #include <optional>
-#include "db/datapage.h"
 #include "db/fixed_datapage.h"
 #include "fc/btree.h"
 #include "fc/details.h"

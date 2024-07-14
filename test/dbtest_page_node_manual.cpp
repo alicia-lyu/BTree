@@ -7,7 +7,8 @@
 
 int main() {
   namespace fc = frozenca;
-  // BTree insert-lookup test
+
+  // BTree insert-lookup test with find_page, find_page_lb, find_page_ceil
   {
     fc::BTreeSet<int> btree;
     constexpr int n = 100;
@@ -30,9 +31,31 @@ int main() {
     {
       std::ranges::shuffle(v, gen);
       for (auto num : v) {
-        auto page_res = btree.find_page(num);
+        auto page_res = btree.find_page(num, num);
         assert(page_res.second != nullptr);
+        assert(page_res.first != btree.cend());
+        assert(page_res.second->get_page_key() == num);
+
+        auto page_res_lb = btree.find_page_lb(num);
+        assert(page_res_lb.second != nullptr);
+        assert(page_res_lb.first != btree.cend());
+        assert(page_res.second->get_page_key() == num);
+
+        auto page_res_ceil = btree.find_page_ceil(num);
+        assert(page_res_ceil.second != nullptr);
+        assert(page_res_ceil.first != btree.cend());
+        assert(page_res.second->get_page_key() == num);
       }
+    }
+
+    // Erase page
+    {
+      std::ranges::shuffle(v, gen);
+      for (auto num : v) {
+        auto it = btree.erase_page(num, num);
+        assert(it == btree.cend() || it.get_page()->get_page_key() != num);
+      }
+      assert(btree.size() == 0);
     }
   }
 
@@ -46,8 +69,6 @@ int main() {
   {
     fc::BTreeMultiSet<int> btree{1, 4, 3, 2, 3, 3, 6, 5, 8};
     assert(btree.size() == 9);
-    // btree.erase(3);
-    // assert(btree.size() == 6);
   }
 
   // Order statistic test
@@ -78,12 +99,6 @@ int main() {
     }
     auto rg = btree.enumerate(20, 30);
     assert(std::ranges::distance(rg.begin(), rg.end()) == 11);
-
-    // // erase_if test
-    // {
-    //   btree.erase_if([](auto n) { return n >= 20 && n <= 90; });
-    //   assert(btree.size() == 29);
-    // }
   }
 
   // Join/Split test

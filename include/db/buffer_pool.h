@@ -81,6 +81,13 @@ class BufferPool {
   }
 
   void discard_page(uintmax_t offset) {
+    for (auto page: pages_) {
+        if (page.first == offset) {
+            page_map_.erase(offset);
+            pages_.remove(page);
+            break;
+        }
+    }
     if (offset + PageType::PAGE_SIZE_CONST == empty_pages_start) {
       empty_pages_start = offset;
     } else {
