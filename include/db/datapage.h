@@ -135,14 +135,19 @@ class DataPage {
 
   virtual bool validate(iterator_type it) = 0;
 
-  virtual std::optional<iterator_type> search_lb(const KeyOrRecord& key_or_record) = 0;
+  // No lowerbound: key is less than the first key in the page, returns end()
+  virtual iterator_type search_lb(const KeyOrRecord& key_or_record) = 0;
+  // No upperbound: key is greater than the last key in the page, returns end()
   virtual iterator_type search_ub(const KeyOrRecord& key_or_record) = 0;
-  virtual std::optional<iterator_type> search(const KeyOrRecord& key_or_record) = 0;
+  // Returns end() if not found
+  virtual iterator_type search(const KeyOrRecord& key_or_record) = 0;
 
   virtual std::pair<iterator_type, bool> insert(Record& record, bool allow_dup = true) = 0;
 
   virtual std::optional<iterator_type> erase(iterator_type it) = 0;
   virtual std::optional<iterator_type> erase(const Record& record) = 0;
+
+  virtual bool is_full() = 0;
 
   virtual Key split_with(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
 

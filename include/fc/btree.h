@@ -225,7 +225,7 @@ requires(Fanout >= 2) class BTreeBase {
       page_index_ = page_index;
     }
 
-    void transform_to_placeholder_page() noexcept {
+    void transform_to_min_page() noexcept {
       assert(empty());
       assert(children_.empty());
       assert(height_ == 0);
@@ -293,7 +293,7 @@ requires(Fanout >= 2) class BTreeBase {
       return page_index_ != std::numeric_limits<attr_t>::max();
     }
 
-    [[nodiscard]] bool is_placeholder_page() const {
+    [[nodiscard]] bool is_min_page() const {
       return page_index_ == std::numeric_limits<attr_t>::min();
     }
 
@@ -1692,15 +1692,17 @@ public:
     return const_iterator_type(find_upper_bound(key));
   }
 
-  std::pair<iterator_type, Node *> find_page(const K& key_lb) {
-    auto const_result = static_cast<const std::decay_t<decltype(*this)>*>(this)->find_page(key_lb);
+  std::pair<iterator_type, Node *> find_page(const K& key) {
+    auto const_result = static_cast<const std::decay_t<decltype(*this)>*>(this)->find_page(key);
     return {iterator_type(const_result.first), const_cast<Node*>(const_result.second)};
   }
 
-  std::pair<const_iterator_type, Node *> find_page(const K& key_lb) const {
-    auto it = find_lower_bound(key_lb);
+  std::pair<const_iterator_type, Node *> find_page(const K& key) const {
+    auto it = find_lower_bound(key);
     if (it == cend()) {
-      return {cend(), nullptr};
+      auto it_begin = cbegin();
+      Node * leftmost_page = it_begin.node_->children_[0].get();
+      return {cbegin(), leftmost_page};
     }
     auto node = it.node_;
     auto index = it.index_;
@@ -1806,10 +1808,11 @@ public:
   insert_page(const V &lb_key, size_t page_index) {
     // The first insert_page call:
     // Occupy the leftmost child, as it will never be filled.
+    // TODO: Change to a real page, as smaller-key page may be inserted
     if (size() == 0) {
       assert(!root_->fathers_nodes_or_pages());
       auto page = make_node();
-      page->transform_to_placeholder_page();
+      page->transform_to_min_page();
       page->parent_ = root_.get();
       page->index_ = 0;
       root_->children_.push_back(std::move(page));

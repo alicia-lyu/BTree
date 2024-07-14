@@ -134,14 +134,14 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   bool validate(iterator_type it) override { return get_bit(it) == true; }
 
   // LATER: Migrate to SIMD (How to handle bitmap jumps?)
-  std::optional<iterator_type> search_lb(const KeyOrRecord& key_or_record) override {
+  iterator_type search_lb(const KeyOrRecord& key_or_record) override {
     if (bitmap_->count() == 0) return end();
     size_t left = find_first_occupied(0);  // inclusive
     auto ret = std::memcmp(Base::get_data(key_or_record), get_record_ptr(left), Base::get_size(key_or_record));
     if (ret == 0)
       return iterator_type(this, left);  // Early return helps guarantee left < key_or_record
     else if (ret < 0)
-      return std::nullopt;  // key_or_record is less than the first element
+      return end();  // key_or_record is less than the first element
 
     size_t right = find_first_occupied(RECORD_COUNT) + 1;  // exclusive
     // Note that left is guaranteed to be occupied, while right is not.
@@ -172,7 +172,13 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   iterator_type search_ub(const KeyOrRecord& key_or_record) override {
     if (bitmap_->count() == 0) return begin();
     size_t left = 0;              // inclusive
-    size_t right = RECORD_COUNT;  // exclusive
+    size_t right = find_first_occupied(RECORD_COUNT);
+    auto ret = std::memcmp(Base::get_data(key_or_record), get_record_ptr(right), Base::get_size(key_or_record));
+    if (ret >= 0)
+      return end();
+    ++right; // exclusive
+    // Now it is guaranteed that ub exists before right
+
     while (right - left > 1) {    // lock in to one entry
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
       if (mid == RECORD_COUNT)  // no valid records between [left, right)
@@ -213,14 +219,14 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     return iterator_type(this, left);
   }
 
-  std::optional<iterator_type> search(const KeyOrRecord& key_or_record) override {
+  iterator_type search(const KeyOrRecord& key_or_record) override {
     auto lb = search_lb(key_or_record);
-    if (!lb.has_value()) return std::nullopt;
+    if (!lb.has_value()) return end();
     auto record_lb = *lb.value();
     if (std::memcmp(Base::get_data(key_or_record), record_lb.data(), Base::get_size(key_or_record)) == 0)
       return lb;
     else
-      return std::nullopt;
+      return end();
   }
 
   std::pair<iterator_type, bool> insert(Record& record, bool allow_dup = true) override {
@@ -298,6 +304,10 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     auto found = search(record);
     if (!found.has_value()) return std::nullopt;
     return erase(found.value());
+  }
+
+  bool is_full() {
+    return bitmap_->count() == RECORD_COUNT;
   }
 
   // Returns the key to copy up and insert into the tree
