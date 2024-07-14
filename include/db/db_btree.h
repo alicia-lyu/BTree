@@ -1,11 +1,13 @@
 #ifndef DB_BTREE_H
 #define DB_BTREE_H
 
+#include <sys/types.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <iterator>
 #include <limits>
 #include <variant>
 #include <optional>
@@ -38,7 +40,7 @@ class DBBTree {
     using value_type = typename PageType::Record;
     using pointer = value_type*;
     using reference = value_type&;
-    using iterator_category = std::bidirectional_iterator_tag;
+    using iterator_category = std::forward_iterator_tag;
     using iterator_concept = iterator_category;
 
     static reference make_ref(value_type& val) noexcept { return val; }
@@ -49,14 +51,15 @@ class DBBTree {
     using value_type = typename PageType::Record;
     using pointer = const value_type*;
     using reference = const value_type&;
-    using iterator_category = std::bidirectional_iterator_tag;
+    using iterator_category = std::forward_iterator_tag;
     using iterator_concept = iterator_category;
 
     static reference make_ref(const value_type& val) noexcept { return val; }
   };
 
   template <typename IterTraits>
-  struct DBBTreeIterator {
+  class DBBTreeIterator {
+   public:
     using difference_type = typename IterTraits::difference_type;
     using value_type = typename IterTraits::value_type;
     using pointer = typename IterTraits::pointer;
@@ -64,12 +67,21 @@ class DBBTree {
     using iterator_category = typename IterTraits::iterator_category;
     using iterator_concept = typename IterTraits::iterator_concept;
 
-    PageType* page_ = nullptr;
+   private:
+    PageType* page_;
     typename PageType::iterator_type page_iter_;
+    void increment() noexcept {
+      ++page_iter_;
+      if (page_iter_ != page_->end()) return;
+      auto next_page_offset = page_->next_page_offset_;
+      if (next_page_offset == std::numeric_limits<uintmax_t>::max()) return; // end of the tree
+      page_ = new PageType(page_->path_, next_page_offset);
+    }
 
-    DBBTreeIterator() noexcept = default;
-
+   public:
     DBBTreeIterator(PageType* page, typename PageType::iterator_type page_iter) noexcept : page_{page}, page_iter_{page_iter} {}
+
+    DBBTreeIterator() = delete;
 
     template <typename IterTraitsOther>
     DBBTreeIterator(const DBBTreeIterator<IterTraitsOther>& other) noexcept : DBBTreeIterator(other.page_, other.page_iter_) {}
@@ -77,16 +89,6 @@ class DBBTree {
     reference operator*() const noexcept { return IterTraits::make_ref(*page_iter_); }
 
     pointer operator->() const noexcept { return &(IterTraits::make_ref(*page_iter_)); }
-
-    void increment() noexcept {
-      ++page_iter_;
-      // Handle increment logic to traverse across pages if needed
-    }
-
-    void decrement() noexcept {
-      --page_iter_;
-      // Handle decrement logic to traverse across pages if needed
-    }
 
     DBBTreeIterator& operator++() noexcept {
       increment();
@@ -99,16 +101,7 @@ class DBBTree {
       return temp;
     }
 
-    DBBTreeIterator& operator--() noexcept {
-      decrement();
-      return *this;
-    }
-
-    DBBTreeIterator operator--(int) noexcept {
-      DBBTreeIterator temp = *this;
-      decrement();
-      return temp;
-    }
+    // operator-- is limited to the same page
 
     friend bool operator==(const DBBTreeIterator& x, const DBBTreeIterator& y) noexcept { return x.page_ == y.page_ && x.page_iter_ == y.page_iter_; }
 
@@ -137,7 +130,7 @@ class DBBTree {
     btree_file << btree_;
   }
 
-  uintmax_t translated_offset(attr_t page_index) { // page table
+  uintmax_t translated_offset(attr_t page_index) {  // page table
     if (page_index < 0)
       throw std::runtime_error("Placeholder page index");
     else if (page_index == std::numeric_limits<attr_t>::max())
@@ -145,9 +138,8 @@ class DBBTree {
     return page_index * PageType::PAGE_SIZE;
   }
 
-  attr_t translated_index(uintmax_t offset) { // page table
-    if (offset % PageType::PAGE_SIZE != 0)
-      throw std::runtime_error("Invalid offset");
+  attr_t translated_index(uintmax_t offset) {  // page table
+    if (offset % PageType::PAGE_SIZE != 0) throw std::runtime_error("Invalid offset");
     return offset / PageType::PAGE_SIZE;
   }
 
@@ -175,10 +167,10 @@ class DBBTree {
   std::pair<iterator, bool> insert(const typename PageType::Record& record) {
     auto key = PageType::get_key(record);
     auto [btree_it1, target_node] = btree_.find_page(key);
-    PageType * target_page = new PageType(pages_path_, translated_offset(target_node->page_index_));
+    PageType* target_page = new PageType(pages_path_, translated_offset(target_node->page_index_));
     if (target_page->is_full()) {
-      uintmax_t new_offset = std::filesystem::file_size(pages_path_); // Find empty pages: page table?
-      PageType * new_page = new PageType(pages_path_, new_offset); 
+      uintmax_t new_offset = std::filesystem::file_size(pages_path_);  // Find empty pages: page table?
+      PageType* new_page = new PageType(pages_path_, new_offset);
       key_type mid_key = target_page->split_with(new_page);
       btree_.insert(mid_key, translated_index(new_offset));
       if (std::memcmp(&key, &mid_key, sizeof(key)) >= 0) {
@@ -190,13 +182,9 @@ class DBBTree {
     return {iterator(&target_page, page_it), inserted};
   }
 
-  iterator begin() {
-    return iterator(const_cast<DBBTree<AllowDup, Fanout, PageType>>(this).begin());
-  }
+  iterator begin() { return iterator(const_cast<DBBTree<AllowDup, Fanout, PageType>>(this).begin()); }
 
-  iterator end() {
-    return iterator(const_cast<DBBTree<AllowDup, Fanout, PageType>>(this).end());
-  }
+  iterator end() { return iterator(const_cast<DBBTree<AllowDup, Fanout, PageType>>(this).end()); }
 
   const_iterator begin() const {
     auto btree_begin = btree_.begin();

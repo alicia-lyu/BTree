@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <cstring>
 #include <iterator>
@@ -39,11 +40,8 @@ class DataPage {
  protected:
   using KeyOrRecord = std::variant<Record, Key>;
   using MMapFile = frozenca::MemoryMappedFileImpl;
-  uintmax_t next_page_offset_;
 
-  DataPage(MMapFile& mmap_file, uintmax_t file_offset) : next_page_offset_(std::bit_cast<uintmax_t>(get_mmap_ptr(mmap_file, file_offset))) {}
-
-  DataPage() : next_page_offset_(0) {}
+  DataPage() : next_page_offset_(std::numeric_limits<uintmax_t>::max()) {}
 
   virtual ~DataPage() {}
 
@@ -52,6 +50,7 @@ class DataPage {
   }
 
  public:
+  uintmax_t next_page_offset_;
   static std::string record_to_string(const Record& record) { return std::string(record.begin(), record.end()); }
 
   static const void* get_data(const KeyOrRecord key_or_record) {
