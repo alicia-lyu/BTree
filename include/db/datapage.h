@@ -61,6 +61,12 @@ class DataPage {
     return std::visit([](const auto& key_or_record) -> size_t { return key_or_record.size(); }, key_or_record);
   }
 
+  static Key extract_key(const Record & record) {
+    Key key;
+    std::copy(record.begin(), record.end(), key.begin());
+    return key;
+  }
+
   virtual Record* get_record(size_t index) = 0;
   virtual Record copy_record(size_t index) = 0;
   virtual unsigned char* get_record_ptr(size_t index) = 0;
@@ -79,11 +85,6 @@ class DataPage {
     using reference = value_type&;
 
     Iterator(DataPage<PAGE_SIZE, Record, Key>* page, size_t index) : page_(page), index_(index) {}
-
-    Record* get_record() { return page_->get_record(index_); }
-    Record copy_record() { return page_->copy_record(index_); }
-    Key* get_key() { return page_->get_key(index_); }
-    Key copy_key() { return page_->copy_key(index_); }
 
     Iterator& operator++() {
       ++index_;
@@ -111,9 +112,9 @@ class DataPage {
 
     bool operator!=(const Iterator& other) const { return !(*this == other); }
 
-    reference operator*() { return *page_->get_record(index_); }
+    reference operator*() const { return *page_->get_record(index_); }
 
-    pointer operator->() { return page_->get_record(index_); }
+    pointer operator->() const { return page_->get_record(index_); }
 
     bool operator<(const Iterator& other) const { return index_ < other.index_; }
     bool operator<=(const Iterator& other) const { return index_ <= other.index_; }
@@ -124,7 +125,7 @@ class DataPage {
     Iterator operator+(difference_type n) const { return Iterator(page_, index_ + n); }
     Iterator operator-(difference_type n) const { return Iterator(page_, index_ - n); }
 
-    DataPage<PAGE_SIZE, Record, Key>* get_page() { return page_; }
+    virtual DataPage<PAGE_SIZE, Record, Key>* get_page() { return page_; }
   };
 
   using iterator_type = Iterator;
@@ -141,7 +142,7 @@ class DataPage {
   // Returns end() if not found
   virtual iterator_type search(const KeyOrRecord& key_or_record) = 0;
 
-  virtual std::pair<iterator_type, bool> insert(Record& record, bool allow_dup = true) = 0;
+  virtual std::pair<iterator_type, bool> insert(const Record& record, bool allow_dup = true) = 0;
 
   virtual std::optional<iterator_type> erase(iterator_type it) = 0;
   virtual std::optional<iterator_type> erase(const Record& record) = 0;
@@ -149,11 +150,14 @@ class DataPage {
   virtual bool is_full() = 0;
 
   virtual Key split_with(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
+  virtual void merge_with(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
+  virtual Key borrow_from(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
 
   virtual bool verify_order() = 0;
 
   virtual iterator_type max() = 0;
   virtual iterator_type min() = 0;
+  virtual Key copy_min_key() {return copy_key(0);}
 
   // LATER: STL-like interface
   // using value_type = Record;
@@ -163,8 +167,8 @@ class DataPage {
   // using const_iterator = const Iterator;
   // using size_type = size_t;
   // using difference_type = std::ptrdiff_t;
-  // virtual size_type size() const = 0;
-  // virtual size_type max_size() const = 0;
+  virtual size_t size() const = 0;
+  virtual size_t max_size() const = 0;
   // virtual bool empty() const = 0;
   // virtual void clear() = 0;
   // virtual void swap(DataPage& other) = 0;

@@ -441,6 +441,17 @@ requires(Fanout >= 2) class BTreeBase {
       }
     }
 
+    Node * get_page() const noexcept {
+      if (node_->is_leaf()) {
+        assert(node_->children_.size() >= index_ + 2);
+        return node_->children_[index_ + 1].get();
+      } else {
+        Node * next_leaf = leftmost_leaf(node_->children_[index_ + 1].get());
+        assert(next_leaf->children_.front());
+        return next_leaf->children_.front().get();
+      }
+    }
+
     void increment() noexcept {
       // we don't do past to end() check for efficiency
       if (!node_->is_leaf()) {
@@ -1443,6 +1454,9 @@ protected:
       curr->size_--;
       curr = curr->parent_;
     }
+    if (node->fathers_nodes_or_pages()) {
+      node->children_.erase(node->children_.begin() + i + 1);
+    }
     assert(verify());
     return iter;
   }
@@ -1518,9 +1532,13 @@ protected:
         } else if (x->children_[i]->can_take_key()) {
           // swap key with pred
           nonconst_iterator_type iter(x, i);
-          auto pred = std::prev(iter);
+          nonconst_iterator_type pred = std::prev(iter);
           assert(pred.node_ == rightmost_leaf(x->children_[i].get()));
           std::iter_swap(pred, iter);
+          if (pred.node_->fathers_nodes_or_pages()) {
+            pred.node_->children_.back().swap(
+              leftmost_leaf(x->children_[i + 1].get())->children_.front());
+          }
           // search pred
           x = x->children_[i].get();
           auto curr = x;
@@ -1538,6 +1556,7 @@ protected:
           auto succ = std::next(iter);
           assert(succ.node_ == leftmost_leaf(x->children_[i + 1].get()));
           std::iter_swap(succ, iter);
+          // Page is right on the correct place
           // search succ
           x = x->children_[i + 1].get();
           auto curr = x;
@@ -1697,24 +1716,22 @@ public:
     return {iterator_type(const_result.first), const_cast<Node*>(const_result.second)};
   }
 
-  std::pair<const_iterator_type, Node *> find_page(const K& key) const {
-    auto it = find_lower_bound(key);
-    if (it == cend()) {
+  std::pair<const_iterator_type, Node *> find_page(const K& key, attr_t page_index) const {
+    auto lb = find_lower_bound(key);
+    auto ub = find_upper_bound(key);
+    if (lb == cend()) {
       auto it_begin = cbegin();
       Node * leftmost_page = it_begin.node_->children_[0].get();
       return {cbegin(), leftmost_page};
     }
-    auto node = it.node_;
-    auto index = it.index_;
-    if (!node->is_leaf()) {
-      node = leftmost_leaf(node->children_[index + 1].get());
-      index = 0;
-    } else {
-      ++index; // right child
+    for (iterator_type it = lb; it < ub; ++it) {
+      Node* page = it.get_page();
+      if (page->page_index_ == page_index) {
+        assert(page->get_page_key() == key);
+        return {it, page};
+      }
     }
-    Node * page = node->children_[index].get();
-    assert(page->validate_page());
-    return {it, page};
+    return {cend(), nullptr};
   }
 
   std::ranges::subrange<iterator_type> equal_range(const K &key) {
@@ -1945,7 +1962,12 @@ public:
     return erase_hint(value, hints);
   }
 
-  // LATER: Do we need erase_page at all?
+  const_iterator_type erase_page(const K &key_lb, attr_t page_index) {
+    auto [it, page] = find_page(key_lb, page_index);
+    if (page == nullptr) return cend();
+    assert(!page->is_min_page());
+    return erase(it);
+  }
 
   size_type erase(const K &key) {
     if constexpr (AllowDup) {

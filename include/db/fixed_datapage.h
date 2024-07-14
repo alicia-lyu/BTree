@@ -13,6 +13,7 @@
 template <size_t PAGE_SIZE, size_t RECORD_SIZE, size_t KEY_SIZE>
 class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char, RECORD_SIZE>, std::array<unsigned char, KEY_SIZE>> {
  public:
+  static constexpr size_t PAGE_SIZE_CONST = PAGE_SIZE;
   static constexpr size_t RECORD_COUNT = (PAGE_SIZE - sizeof(uintmax_t)) / (RECORD_SIZE + 1 / 8);
   using Base = DataPage<PAGE_SIZE, std::array<unsigned char, RECORD_SIZE>, std::array<unsigned char, KEY_SIZE>>;
   using Key = std::array<unsigned char, KEY_SIZE>;
@@ -26,43 +27,61 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   using Self = FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>;
 
  protected:
-  std::bitset<RECORD_COUNT>* bitmap_;  // 0 for free, 1 for occupied
-  RecordData* record_data_;
+  std::unique_ptr<std::bitset<RECORD_COUNT>> bitmap_;  // 0 for free, 1 for occupied
+  std::unique_ptr<RecordData> record_data_;
   std::filesystem::path path_;
   uintmax_t page_offset_;
 
  public:
-  FixedRecordDataPage(std::filesystem::path p, uintmax_t file_offset) {
+  FixedRecordDataPage(std::filesystem::path p, uintmax_t file_offset) : path_(p), page_offset_(file_offset) {
+    if (file_offset == 0) throw std::runtime_error("Metadata offset");
+    bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>();
+    record_data_ = std::make_unique<RecordData>();
     std::ifstream file(p, std::ios::binary | std::ios::in);
     file.seekg(file_offset);
+    assert(sizeof(uintmax_t) + sizeof(std::bitset<RECORD_COUNT>) + sizeof(RecordData) <= PAGE_SIZE);
     if (!file.read(reinterpret_cast<char*>(&this->next_page_offset_), sizeof(uintmax_t))) {
       throw std::runtime_error("Failed to read next page offset");
     }
-    if (!file.read(reinterpret_cast<char*>(bitmap_), sizeof(std::bitset<RECORD_COUNT>))) {
+    if (!file.read(reinterpret_cast<char*>(bitmap_.get()), sizeof(std::bitset<RECORD_COUNT>))) {
       throw std::runtime_error("Failed to read bitmap");
     }
-    if (!file.read(reinterpret_cast<char*>(record_data_), DATA_SIZE)) {
+    if (!file.read(reinterpret_cast<char*>(record_data_.get()), sizeof(RecordData))) {
       throw std::runtime_error("Failed to read record data");
     }
   }
 
-  FixedRecordDataPage() : bitmap_(std::make_unique<std::bitset<RECORD_COUNT>>()), record_data_(std::make_unique<RecordData>(RECORD_COUNT)) {}
+  FixedRecordDataPage() {
+    bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>();
+    record_data_ = std::make_unique<RecordData>();
+    this->next_page_offset_ = std::numeric_limits<uintmax_t>::max();
+  }
 
   ~FixedRecordDataPage() {
-    std::ofstream file(path_, std::ios::binary | std::ios::out);
+    std::ofstream file(path_, std::ios::binary | std::ios::out | std::ios::in);
     file.seekp(page_offset_);
     if (!file.write(reinterpret_cast<char*>(&this->next_page_offset_), sizeof(uintmax_t))) {
-        throw std::runtime_error("Failed to write next page offset");
+      throw std::runtime_error("Failed to write next page offset");
     }
-    if (!file.write(reinterpret_cast<char*>(bitmap_), sizeof(std::bitset<RECORD_COUNT>))) {
-        throw std::runtime_error("Failed to write bitmap");
+    if (!file.write(reinterpret_cast<char*>(bitmap_.get()), sizeof(std::bitset<RECORD_COUNT>))) {
+      throw std::runtime_error("Failed to write bitmap");
     }
-    if (!file.write(reinterpret_cast<char*>(record_data_), DATA_SIZE)) {
-        throw std::runtime_error("Failed to write record data");
+    if (!file.write(reinterpret_cast<char*>(record_data_.get()), sizeof(RecordData))) {
+      throw std::runtime_error("Failed to write record data");
+    }
+
+    size_t padding = PAGE_SIZE_CONST - sizeof(uintmax_t) - sizeof(std::bitset<RECORD_COUNT>) - sizeof(RecordData);
+    if (padding < 0)
+      throw std::runtime_error("Data exceeds page size.");
+    else if (padding > 0) {
+      std::cout << "WARNING: Padding " << padding << " bytes to page" << std::endl;
+      file.write(std::string(padding, '\0').c_str(), padding);
     }
   }
 
-  size_t size() { return bitmap_->count(); }
+  size_t size() const override { return bitmap_->count(); }
+
+  size_t max_size() const override { return RECORD_COUNT; }
 
  protected:
   Record* get_record(size_t index) override {
@@ -90,7 +109,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   }
 
  public:
-  using typename Base::iterator_type;
+  using iterator_type = Base::Iterator;
 
   iterator_type begin() override { return iterator_type(this, 0); }
 
@@ -171,15 +190,14 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
   iterator_type search_ub(const KeyOrRecord& key_or_record) override {
     if (bitmap_->count() == 0) return begin();
-    size_t left = 0;              // inclusive
+    size_t left = 0;  // inclusive
     size_t right = find_first_occupied(RECORD_COUNT);
     auto ret = std::memcmp(Base::get_data(key_or_record), get_record_ptr(right), Base::get_size(key_or_record));
-    if (ret >= 0)
-      return end();
-    ++right; // exclusive
+    if (ret >= 0) return end();
+    ++right;  // exclusive
     // Now it is guaranteed that ub exists before right
 
-    while (right - left > 1) {    // lock in to one entry
+    while (right - left > 1) {  // lock in to one entry
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
       if (mid == RECORD_COUNT)  // no valid records between [left, right)
         return iterator_type(this, left);
@@ -229,7 +247,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
       return end();
   }
 
-  std::pair<iterator_type, bool> insert(Record& record, bool allow_dup = true) override {
+  std::pair<iterator_type, bool> insert(const Record& record, bool allow_dup = true) override {
     if (bitmap_->count() == RECORD_COUNT) return {iterator_type(this, RECORD_COUNT), false};
     // page is full, split to be managed by page owner
     iterator_type ub = search_ub(record);
@@ -294,6 +312,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
       (*bitmap_)[index] = false;
       return iterator_type(this, index);
     }
+    // TODO: Merge with the next page if needed
     return std::nullopt;
   }
 
@@ -306,9 +325,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     return erase(found.value());
   }
 
-  bool is_full() {
-    return bitmap_->count() == RECORD_COUNT;
-  }
+  bool is_full() override { return bitmap_->count() == RECORD_COUNT; }
 
   // Returns the key to copy up and insert into the tree
   // Operate on the assumption that a datapage is (almost) full when it must split, DERERRED to caller to ensure that
@@ -335,6 +352,67 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
     // Return the key of the middle record
     return copy_key(mid);
+  }
+
+  // Place all valid records at the beginning of the page
+  // Returning the start of empty space
+  size_t solidify() {
+    size_t free_spots_trailing = 0;
+    auto bitmap_it = bitmap_->end() - 1;
+    while (bitmap_it >= bitmap_->begin() && *bitmap_it == 0) {
+      ++free_spots_trailing;
+      --bitmap_it;
+    }
+    for (size_t i = 0; i < RECORD_COUNT; i++) {
+      if (!bitmap_->test(i)) {
+        std::move(record_data_->begin() + (i + 1) * RECORD_SIZE, record_data_->end(), record_data_->begin() + i * RECORD_SIZE);
+        std::fill(record_data_->end() - RECORD_SIZE, record_data_->end(), "\0");
+        std::move(bitmap_->begin() + i + 1, bitmap_->end(), bitmap_->begin() + i);
+        std::fill(bitmap_->end() - 1, bitmap_->end(), 0);
+        free_spots_trailing++;
+        --i;  // Recheck the current index
+      }
+    }
+    return RECORD_COUNT - free_spots_trailing;
+  }
+
+  void merge_with(Base* right_sibling) override {
+    Self* right_sibling_self = dynamic_cast<Self*>(right_sibling);
+    assert(right_sibling_self && "right_sibling is not of the correct type");
+    size_t target_size = size() + right_sibling_self->size();
+    assert(target_size <= max_size());
+    auto empty_start = solidify();
+    auto right_empty_start = right_sibling_self->solidify();
+    std::move(right_sibling_self->record_data_->begin(), right_sibling_self->record_data_->end(), record_data_->begin() + empty_start * RECORD_SIZE);
+    std::move(right_sibling_self->bitmap_->begin(), right_sibling_self->bitmap_->end(), bitmap_->begin() + empty_start);
+    assert(size() == target_size);
+    assert(verify_order());
+  }
+
+  // When the current page is less than half full, redistribute records from the right sibling
+  Key borrow_from(Base* right_sibling) override {
+    Self* right_sibling_self = dynamic_cast<Self*>(right_sibling);
+    assert(right_sibling_self && "right_sibling is not of the correct type");
+    size_t target_size = size() + right_sibling_self->size();
+    assert(target_size <= max_size());
+    size_t left_size = size();
+    size_t right_size = right_sibling_self->size();
+    size_t total_size = left_size + right_size;
+    size_t target_left_size = total_size / 2;
+    size_t left_empty_start = solidify();
+    right_sibling_self->solidify();
+    assert(left_size < target_left_size);
+    size_t to_move = target_left_size - left_size;
+    std::move(right_sibling_self->record_data_->begin(),
+              right_sibling_self->record_data_->begin() + to_move * RECORD_SIZE,
+              record_data_->begin() + left_empty_start * RECORD_SIZE);
+    std::move(right_sibling_self->bitmap_->begin(), right_sibling_self->bitmap_->begin() + to_move, bitmap_->begin() + left_empty_start);
+    // Fill moved records in right sibling with null
+    std::fill((right_sibling_self->record_data_->begin(), right_sibling_self->record_data_->begin() + to_move * RECORD_SIZE, "\0"));
+    std::fill(right_sibling_self->bitmap_->begin(), right_sibling_self->bitmap_->begin() + to_move, 0);
+    assert(size() == target_left_size);
+    assert(verify_order());
+    return right_sibling->copy_min_key();
   }
 
   bool verify_order() override {
