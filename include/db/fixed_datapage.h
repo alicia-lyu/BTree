@@ -19,7 +19,6 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   using Key = std::array<unsigned char, KEY_SIZE>;
   using Record = std::array<unsigned char, RECORD_SIZE>;
   using typename Base::KeyOrRecord;
-  using typename Base::MMapFile;
 
  private:
   static constexpr size_t DATA_SIZE = RECORD_COUNT * RECORD_SIZE;
@@ -312,7 +311,6 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
       (*bitmap_)[index] = false;
       return iterator_type(this, index);
     }
-    // TODO: Merge with the next page if needed
     return std::nullopt;
   }
 

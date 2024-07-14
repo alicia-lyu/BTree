@@ -10,8 +10,7 @@
 #include <cstring>
 #include <iterator>
 #include <cassert>
-
-#include "fc/mmfile_nix.h"
+#include <string>
 
 // C++ named requirement: Container
 template <typename C>
@@ -39,15 +38,10 @@ template <size_t PAGE_SIZE, Container Record, Container Key>
 class DataPage {
  protected:
   using KeyOrRecord = std::variant<Record, Key>;
-  using MMapFile = frozenca::MemoryMappedFileImpl;
 
   DataPage() : next_page_offset_(std::numeric_limits<uintmax_t>::max()) {}
 
   virtual ~DataPage() {}
-
-  void* get_mmap_ptr(MMapFile& mmap_file, uintmax_t file_offset, std::size_t offset = 0) {
-    return reinterpret_cast<void*>(static_cast<unsigned char*>(mmap_file.get_page_ptr(file_offset, PAGE_SIZE)) + offset + sizeof(uintmax_t));
-  }
 
  public:
   uintmax_t next_page_offset_;

@@ -12,8 +12,8 @@
 // and all required methods are implemented.
 
 constexpr size_t PAGE_SIZE = 4096;
-constexpr size_t RECORD_SIZE = 100;
-constexpr size_t KEY_SIZE = 10;
+constexpr size_t RECORD_SIZE = 200;
+constexpr size_t KEY_SIZE = 20;
 constexpr size_t MAX_PAGES = 8;
 
 using Record = std::array<unsigned char, RECORD_SIZE>;
@@ -67,7 +67,7 @@ void test_DBBTree_insert_search() {
     assert(inserted == true);
 
     // Search for the inserted record
-    auto it2 = btree.search(create_sample_key(1));
+    auto it2 = btree.search(create_sample_record(1));
     assert(it2 != btree.end());
     std::cout << "DBBTree search test passed." << std::endl;
 }
@@ -147,9 +147,9 @@ void test_page_serialization() {
         FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset);
         auto page_it = page.begin();
         for (int i = 1; i <= 100; ++i, ++page_it) {
-            auto record = page_it.get_record();
+            auto record = *page_it;
             std::string id_str = std::to_string(i);
-            assert(std::equal(id_str.begin(), id_str.end(), record->begin()));
+            assert(std::equal(id_str.begin(), id_str.end(), record.begin()));
         }
     }
 

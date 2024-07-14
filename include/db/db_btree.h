@@ -146,18 +146,47 @@ class DBBTree {
     return offset / PageType::PAGE_SIZE_CONST;
   }
 
-  iterator search(const key_type& key) {
-    auto [btree_it, node] = btree_.find_page(key);
-    if (!node) return std::nullopt;
+  iterator search_lb(const key_type& key) {
+    auto [btree_it, node] = btree_.find_page_lb(key);
 
-    key_type page_key = node->get_page_key();
     auto offset = translate_offset(node->page_index_);
     auto& page = buffer_pool_.get_page(offset);
 
-    auto page_it = page->search(page_key);
-    if (page_it == page->end()) return end();
+    auto page_it = page->search_lb(key);
+    if (page_it == page->end()) {
+      assert(node->is_min_page());
+      return end();
+    } else {
+      return iterator(page.get(), *page_it);
+    }
+  }
 
-    return iterator(page.get(), *page_it);
+  iterator search_ub(const key_type& key) {
+    auto [btree_it, node] = btree_.find_page_ceil(key);
+
+    auto offset = translate_offset(node->page_index_);
+    auto& page = buffer_pool_.get_page(offset);
+
+    auto page_it = page->search_ub(key);
+    if (page_it == page->end()) {
+      assert(btree_it == std::prev(btree_.end()));
+      return end();
+    } else {
+      return iterator(page.get(), *page_it);
+    }
+  }
+
+  iterator search(const value_type & record) {
+    iterator lb = search_lb(PageType::extract_key(record));
+    while (lb != end()) {
+      auto ret = std::memcmp(&record, &*lb, sizeof(record));
+      if (ret == 0) {
+        return lb;
+      } else if (ret > 0) {
+        return end();
+      }
+      ++lb;
+    }
   }
 
   std::pair<iterator, bool> insert(const value_type& record) {
@@ -191,14 +220,14 @@ class DBBTree {
     return page_it.has_value() ? std::make_optional(iterator(it.get_page(), *page_it)) : std::nullopt;
   }
 
-  void inspect_after_erase(PageType::iterator_type it) {
+  PageType::iterator_type inspect_after_erase(PageType::iterator_type it) {
     PageType * page = dynamic_cast<PageType*>(it.get_page());
     uintmax_t sibling_offset = page->next_page_offset_;
     if (page->size() < page->max_size() / 2) {
       PageType * sibling = buffer_pool_.get_page(sibling_offset);
       if (sibling->size() + page->size() <= page->max_size()) {
         page->merge_with(sibling);
-        btree_.erase(sibling->copy_min_key());
+        btree_.erase_page(sibling->copy_min_key(), translated_index(sibling_offset));
         buffer_pool_.discard_page(sibling->next_page_offset_);
       } else {
         key_type sibling_original_key = sibling->copy_min_key();
@@ -206,7 +235,9 @@ class DBBTree {
         btree_.erase_page(sibling_original_key, translated_index(sibling_offset));
         btree_.insert_page(mid_key, translated_index(sibling_offset));
       }
+      // TODO: it is shifted
     }
+    return it;
   }
 
   iterator begin() { return iterator(const_cast<DBBTree<AllowDup, Fanout, PageType>>(this).begin()); }

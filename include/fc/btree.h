@@ -442,6 +442,9 @@ requires(Fanout >= 2) class BTreeBase {
     }
 
     Node * get_page() const noexcept {
+      if (index_ == node_->nkeys()) {
+        return nullptr;
+      }
       if (node_->is_leaf()) {
         assert(node_->children_.size() >= index_ + 2);
         return node_->children_[index_ + 1].get();
@@ -1711,11 +1714,6 @@ public:
     return const_iterator_type(find_upper_bound(key));
   }
 
-  std::pair<iterator_type, Node *> find_page(const K& key) {
-    auto const_result = static_cast<const std::decay_t<decltype(*this)>*>(this)->find_page(key);
-    return {iterator_type(const_result.first), const_cast<Node*>(const_result.second)};
-  }
-
   std::pair<const_iterator_type, Node *> find_page(const K& key, attr_t page_index) const {
     auto lb = find_lower_bound(key);
     auto ub = find_upper_bound(key);
@@ -1728,10 +1726,32 @@ public:
       Node* page = it.get_page();
       if (page->page_index_ == page_index) {
         assert(page->get_page_key() == key);
-        return {it, page};
+        return {const_iterator_type(it), page};
       }
     }
     return {cend(), nullptr};
+  }
+
+  std::pair<const_iterator_type, Node *> find_page_lb(const K& key) const {
+    auto lb = find_lower_bound(key);
+    if (lb == cend()) {
+      auto it_begin = cbegin();
+      Node * leftmost_page = it_begin.node_->children_[0].get();
+      return {cbegin(), leftmost_page};
+    }
+    Node* page = lb.get_page();
+    return {lb, page};
+  }
+
+  std::pair<const_iterator_type, Node *> find_page_ceil(const K& key) const {
+    auto ub = find_upper_bound(key);
+    if (ub == cend()) {
+      auto it_end = cend();
+      Node * rightmost_page = std::prev(it_end).get_page(); // Potentially any arbitrarily large record can be placed here
+      return {std::prev(it_end), rightmost_page};
+    }
+    Node* page = ub.get_page();
+    return {ub, page};
   }
 
   std::ranges::subrange<iterator_type> equal_range(const K &key) {
