@@ -2,6 +2,7 @@
 #define __FC_BTREE_H__
 
 #include <cstddef>
+#include <exception>
 #ifndef FC_USE_SIMD
 #define FC_USE_SIMD 0
 #endif // FC_USE_SIMD
@@ -453,6 +454,16 @@ requires(Fanout >= 2) class BTreeBase {
         assert(next_leaf->children_.front());
         return next_leaf->children_.front().get();
       }
+    }
+
+    Node* get_next_page() const noexcept {
+        BTreeIterator temp = *this;
+        temp.increment();
+        try {
+          return temp.get_page();
+        } catch (std::exception &e) {
+          return nullptr;
+        }
     }
 
     void increment() noexcept {
@@ -1715,27 +1726,35 @@ public:
   }
 
   std::pair<const_iterator_type, Node *> find_page(const K& key, attr_t page_index) const {
-    auto lb = find_lower_bound(key);
-    auto ub = find_upper_bound(key);
+    const_iterator_type lb = find_lower_bound(key);
     if (lb == cend()) {
       auto it_begin = cbegin();
+      if (!it_begin.node_->fathers_nodes_or_pages()) {
+        return {cend(), nullptr};
+      }
       Node * leftmost_page = it_begin.node_->children_[0].get();
       return {cbegin(), leftmost_page};
     }
-    for (iterator_type it = lb; it != ub; ++it) {
+    for (const_iterator_type it = lb; it != cend(); ++it) {
       Node* page = it.get_page();
       if (page->page_index_ == page_index) {
         assert(page->get_page_key() == key);
-        return {const_iterator_type(it), page};
+        return {it, page};
+      }
+      if (Comp{}(key, page->get_page_key())) {
+        break;
       }
     }
-    return {cend(), nullptr};
+    return {end(), nullptr};
   }
 
   std::pair<const_iterator_type, Node *> find_page_lb(const K& key) const {
     auto lb = find_lower_bound(key);
     if (lb == cend()) {
       auto it_begin = cbegin();
+      if (!it_begin.node_->fathers_nodes_or_pages()) {
+        return {cend(), nullptr};
+      }
       Node * leftmost_page = it_begin.node_->children_[0].get();
       return {cbegin(), leftmost_page};
     }
@@ -1747,7 +1766,7 @@ public:
     auto ub = find_upper_bound(key);
     if (ub == cend()) {
       auto it_end = cend();
-      Node * rightmost_page = std::prev(it_end).get_page(); // Potentially any arbitrarily large record can be placed here
+      Node * rightmost_page = std::prev(it_end).get_page(); // Potentially any arbitrarily large record can be placed here, could be nullptr
       return {std::prev(it_end), rightmost_page};
     }
     Node* page = ub.get_page();
@@ -1830,6 +1849,19 @@ protected:
     return hints;
   }
 
+  void insert_leftmost_page() {
+    // The first insert_page call:
+    // Occupy the leftmost child, as it will never be filled.
+    // TODO: Change to a real page, as smaller-key page may be inserted
+    assert(size() == 0);
+    assert(!root_->fathers_nodes_or_pages());
+    auto page = make_node();
+    page->transform_to_min_page();
+    page->parent_ = root_.get();
+    page->index_ = 0;
+    root_->children_.push_back(std::move(page));
+  }
+
 public:
   std::conditional_t<AllowDup, iterator_type, std::pair<iterator_type, bool>>
   insert(const V &key) {
@@ -1843,16 +1875,8 @@ public:
 
   std::conditional_t<AllowDup, iterator_type, std::pair<iterator_type, bool>>
   insert_page(const V &lb_key, size_t page_index) {
-    // The first insert_page call:
-    // Occupy the leftmost child, as it will never be filled.
-    // TODO: Change to a real page, as smaller-key page may be inserted
-    if (size() == 0) {
-      assert(!root_->fathers_nodes_or_pages());
-      auto page = make_node();
-      page->transform_to_min_page();
-      page->parent_ = root_.get();
-      page->index_ = 0;
-      root_->children_.push_back(std::move(page));
+    if (size() == 0 && !root_->fathers_nodes_or_pages()) {
+      insert_leftmost_page();
     }
 
     auto it = insert_value(lb_key);

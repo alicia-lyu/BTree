@@ -9,6 +9,7 @@
 #include "db/db_btree.h"
 #include "db/buffer_pool.h"
 #include "db/fixed_datapage.h"
+#include "fc/btree.h"
 
 constexpr size_t PAGE_SIZE = 4096;
 constexpr size_t RECORD_SIZE = 200;
@@ -48,7 +49,7 @@ void test_DBBTree_initialization() {
     std::filesystem::remove(btree_path);
 
     // Create the DBBTree instance
-    DBBTree<false, 4, FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>> btree(pages_path, btree_path, MAX_PAGES);
+    DBBTree<false, 4, FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>> dbbtree(pages_path, btree_path, MAX_PAGES);
     std::cout << "DBBTree initialization test passed." << std::endl;
 }
 
@@ -136,18 +137,23 @@ void test_BufferPool() {
     std::cout << "BufferPool test passed." << std::endl;
 }
 
-// Test function for serialization and deserialization
-void test_page_serialization() {
+std::filesystem::path get_new_pages_file(size_t page_count) {
     std::filesystem::path page_path = "./test_page.bin";
-    uintmax_t file_offset = PAGE_SIZE;
 
     std::filesystem::remove(page_path);
 
     std::filesystem::create_directories(page_path.parent_path());
     std::ofstream file(page_path, std::ios::binary);
     file.close();
-    std::filesystem::resize_file(page_path, PAGE_SIZE * 2);
+    std::filesystem::resize_file(page_path, PAGE_SIZE * (page_count + 1));
 
+    return page_path;
+}
+
+// Test function for serialization and deserialization
+void test_page_serialization() {
+    uintmax_t file_offset = PAGE_SIZE;
+    std::filesystem::path page_path = get_new_pages_file(2);
     {
         FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset, PAGE_SIZE * 2);
 
@@ -160,7 +166,7 @@ void test_page_serialization() {
             }
         }
 
-        page.verify_order();
+        assert(page.verify_order());
         // page destroyed
     }
 
@@ -178,32 +184,84 @@ void test_page_serialization() {
 }
 
 // Test to validate record erasure in FixedRecordDataPage
-void test_DataPage_erase() {
-    std::filesystem::path page_path = "./test_page.bin";
-    uintmax_t file_offset = 0;
+void test_page_erase() {
+    std::filesystem::path page_path = get_new_pages_file(1);
+    uintmax_t file_offset = PAGE_SIZE;
 
-    std::filesystem::remove(page_path);
-
-    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset);
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset, 0);
 
     // Insert records to fill up the page
-    for (int i = 1; i <= 50; ++i) {
+    for (size_t i = 0; i < page.RECORD_COUNT; ++i) {
         page.insert(create_sample_record(i));
     }
 
     // Erase half the records
-    for (int i = 1; i <= 25; ++i) {
+    for (size_t i = 0; i < page.RECORD_COUNT / 2; ++i) {
         auto it = page.search(create_sample_record(i));
         page.erase(it);
     }
 
     // Verify remaining records
-    for (int i = 26; i <= 50; ++i) {
+    for (size_t i = page.RECORD_COUNT / 2; i < page.RECORD_COUNT; ++i) {
         auto it = page.search(create_sample_record(i));
         assert(it != page.end());
     }
 
     std::cout << "DataPage erase test passed." << std::endl;
+}
+
+void test_page_split() {
+    std::filesystem::path page_path = get_new_pages_file(2);
+
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page1(page_path, PAGE_SIZE, 0);
+
+    for (size_t i = 0; i < page1.RECORD_COUNT; ++i) {
+        page1.insert(create_sample_record(i));
+    }
+
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page2(page_path, PAGE_SIZE * 2, 0);
+
+    page1.split_with(&page2);
+
+    assert(page1.verify_order());
+
+    assert(page2.verify_order());
+
+    assert(std::memcmp(page1.max()->data(), page2.min()->data(), RECORD_SIZE) <= 0);
+}
+
+void test_page_merge() {
+    std::filesystem::path page_path = get_new_pages_file(2);
+
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page1(page_path, PAGE_SIZE, 0);
+
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page2(page_path, PAGE_SIZE * 2, 0);
+
+    for (size_t i = 0; i < page1.RECORD_COUNT / 2; ++i) {
+        page1.insert(create_sample_record(i));
+        page2.insert(create_sample_record(i + page1.RECORD_COUNT / 2));
+    }
+
+    page1.merge_with(&page2);
+}
+
+void test_page_borrow() {
+    std::filesystem::path page_path = get_new_pages_file(2);
+
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page1(page_path, PAGE_SIZE, 0);
+
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page2(page_path, PAGE_SIZE * 2, 0);
+
+    for (size_t i = 0; i < page1.RECORD_COUNT / 2; ++i) {
+        page1.insert(create_sample_record(i));
+        page2.insert(create_sample_record(i + page1.RECORD_COUNT / 2));
+    }
+
+    for (size_t i = 0; i < 2; ++i) {
+        page2.insert(create_sample_record(i + page1.RECORD_COUNT / 2));
+    }
+
+    page1.borrow_from(&page2);
 }
 
 // Test to validate record erasure in DBBTree
@@ -240,10 +298,14 @@ void test_DBBTree_erase() {
 int main() {
     test_BufferPool();
     test_page_serialization();
+    test_page_erase();
+    test_page_split();
+    test_page_merge();
+    test_page_borrow();
+
     test_DBBTree_initialization();
     test_DBBTree_insert_search();
     test_DBBTree_iterator();
-    test_DataPage_erase();
     test_DBBTree_erase();
     std::cout << "All tests passed successfully." << std::endl;
     return 0;

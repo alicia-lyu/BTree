@@ -33,17 +33,17 @@ int main() {
       for (auto num : v) {
         auto page_res = btree.find_page(num, num);
         assert(page_res.second != nullptr);
-        assert(page_res.first != btree.cend());
+        assert(page_res.first != btree.end());
         assert(page_res.second->get_page_key() == num);
 
         auto page_res_lb = btree.find_page_lb(num);
         assert(page_res_lb.second != nullptr);
-        assert(page_res_lb.first != btree.cend());
+        assert(page_res_lb.first != btree.end());
         assert(page_res.second->get_page_key() == num);
 
         auto page_res_ceil = btree.find_page_ceil(num);
         assert(page_res_ceil.second != nullptr);
-        assert(page_res_ceil.first != btree.cend());
+        assert(page_res_ceil.first != btree.end());
         assert(page_res.second->get_page_key() == num);
       }
     }

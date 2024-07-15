@@ -32,7 +32,8 @@ class BufferPool {
       std::filesystem::create_directories(pages_path.parent_path());
       std::ofstream pages_file(pages_path, std::ios::binary);
       assert(std::filesystem::file_size(pages_path) == 0);
-      std::filesystem::resize_file(pages_path, PageType::PAGE_SIZE_CONST);
+      file_size_ = PageType::PAGE_SIZE_CONST;
+      std::filesystem::resize_file(pages_path, file_size_);
       return;
     }
     std::ifstream pages_file(pages_path, std::ios::binary);
@@ -92,33 +93,32 @@ class BufferPool {
     return pages_.front().second;
   }
 
-  bool query_page(uintmax_t offset) {
-    return page_map_.find(offset) != page_map_.end();
-  }
+  bool query_page(uintmax_t offset) { return page_map_.find(offset) != page_map_.end(); }
 
   std::pair<PagePtr, uintmax_t> get_new_page(uintmax_t next_page_offset) {
     uintmax_t new_offset;
-    if (empty_pages_start + PageType::PAGE_SIZE_CONST <= std::filesystem::file_size(pages_path_)) {
+    if (empty_pages_start + PageType::PAGE_SIZE_CONST <= file_size_) {
       new_offset = empty_pages_start;
       empty_pages_start += PageType::PAGE_SIZE_CONST;
     } else if (!discarded_page_offsets.empty()) {
       new_offset = discarded_page_offsets.back();
       discarded_page_offsets.pop_back();
     } else {
-      new_offset = std::filesystem::file_size(pages_path_);
-      std::filesystem::resize_file(pages_path_, new_offset + PageType::PAGE_SIZE_CONST);
-      empty_pages_start = new_offset + PageType::PAGE_SIZE_CONST;
+      new_offset = file_size_;
+      file_size_ += PageType::PAGE_SIZE_CONST;
+      std::filesystem::resize_file(pages_path_, file_size_);
+      empty_pages_start = file_size_;
     }
     return {get_page(new_offset, next_page_offset), new_offset};
   }
 
   void discard_page(uintmax_t offset) {
-    for (auto &page: pages_) {
-        if (page.first == offset) {
-            page_map_.erase(offset);
-            pages_.remove(page);
-            break;
-        }
+    for (auto& page : pages_) {
+      if (page.first == offset) {
+        page_map_.erase(offset);
+        pages_.remove(page);
+        break;
+      }
     }
     if (offset + PageType::PAGE_SIZE_CONST == empty_pages_start) {
       empty_pages_start = offset;
@@ -127,13 +127,14 @@ class BufferPool {
     }
   }
 
-   private:
-    std::size_t max_pages_;
-    std::filesystem::path pages_path_;
-    std::list<std::pair<uintmax_t, PagePtr>> pages_;  // LRU list
-    std::unordered_map<uintmax_t, decltype(pages_.begin())> page_map_;
-    std::vector<uintmax_t> discarded_page_offsets;  // Before empty_pages_start
-    uintmax_t empty_pages_start;
-  };
+ private:
+  std::size_t max_pages_;
+  std::filesystem::path pages_path_;
+  std::list<std::pair<uintmax_t, PagePtr>> pages_;  // LRU list
+  std::unordered_map<uintmax_t, decltype(pages_.begin())> page_map_;
+  std::vector<uintmax_t> discarded_page_offsets;  // Before empty_pages_start
+  uintmax_t empty_pages_start;
+  uintmax_t file_size_;
+};
 
 #endif
