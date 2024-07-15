@@ -1,4 +1,5 @@
 #include <cstddef>
+#include <fstream>
 #include <iostream>
 #include <array>
 #include <filesystem>
@@ -20,16 +21,20 @@ using Key = std::array<unsigned char, KEY_SIZE>;
 // Helper function to create a sample record
 Record create_sample_record(int id) {
     Record record = {};
+    // Convert the integer to a string with leading zeros, fixed length
     std::string id_str = std::to_string(id);
-    std::copy(id_str.begin(), id_str.end(), record.begin());
+    id_str = std::string(RECORD_SIZE - id_str.length(), '0') + id_str; // Adjust 10 to your required length
+    std::copy(id_str.begin(), id_str.end(), record.data());
     return record;
 }
 
 // Helper function to create a sample key
 Key create_sample_key(int id) {
     Key key = {};
+    // Convert the integer to a string with leading zeros, fixed length
     std::string id_str = std::to_string(id);
-    std::copy(id_str.begin(), id_str.end(), key.begin());
+    id_str = std::string(KEY_SIZE - id_str.length(), '0') + id_str; // Adjust 10 to your required length
+    std::copy(id_str.begin(), id_str.end(), key.data());
     return key;
 }
 
@@ -134,26 +139,38 @@ void test_BufferPool() {
 // Test function for serialization and deserialization
 void test_page_serialization() {
     std::filesystem::path page_path = "./test_page.bin";
-    uintmax_t file_offset = 0;
+    uintmax_t file_offset = PAGE_SIZE;
 
     std::filesystem::remove(page_path);
 
-    {
-        FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset);
+    std::filesystem::create_directories(page_path.parent_path());
+    std::ofstream file(page_path, std::ios::binary);
+    file.close();
+    std::filesystem::resize_file(page_path, PAGE_SIZE * 2);
 
-        for (int i = 1; i <= 100; ++i) {
-            page.insert(create_sample_record(i));
+    {
+        FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset, PAGE_SIZE * 2);
+
+        for (size_t i = 0; i < 100; ++i) {
+            auto [it, ret] = page.insert(create_sample_record(i));
+            if (i < page.RECORD_COUNT) {
+                assert(ret == true);
+            } else {
+                assert(ret == false);
+            }
         }
+
+        page.verify_order();
         // page destroyed
     }
 
     {
         FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset);
         auto page_it = page.begin();
-        for (int i = 1; i <= 100; ++i, ++page_it) {
+        for (size_t i = 0; i < page.RECORD_COUNT; ++i, ++page_it) {
             auto record = *page_it;
-            std::string id_str = std::to_string(i);
-            assert(std::equal(id_str.begin(), id_str.end(), record.begin()));
+            auto expected = create_sample_record(i);
+            assert(std::equal(expected.begin(), expected.end(), record.begin()));
         }
     }
 

@@ -45,6 +45,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
       return;
     }
 
+    assert(std::filesystem::exists(p) && std::filesystem::file_size(p) >= file_offset + PAGE_SIZE);
     std::ifstream file(p, std::ios::binary | std::ios::in);
     file.seekg(file_offset);
     assert(sizeof(uintmax_t) + sizeof(std::bitset<RECORD_COUNT>) + sizeof(RecordData) <= PAGE_SIZE);
@@ -201,7 +202,10 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     size_t left = 0;  // inclusive
     size_t right = find_first_occupied(RECORD_COUNT);
     auto ret = std::memcmp(Base::get_data(key_or_record), get_record_ptr(right), Base::get_size(key_or_record));
-    if (ret >= 0) return end();
+    if (ret >= 0) {
+      if (right == RECORD_COUNT - 1) return end();
+      else return iterator_type(this, right + 1); // The first empty spot
+    }
     ++right;  // exclusive
     // Now it is guaranteed that ub exists before right
 
@@ -256,8 +260,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   }
 
   std::pair<iterator_type, bool> insert(const Record& record, bool allow_dup = true) override {
-    if (bitmap_->count() == RECORD_COUNT) return {iterator_type(this, RECORD_COUNT), false};
-    // page is full, split to be managed by page owner
+    if (bitmap_->count() == RECORD_COUNT) return {end(), false}; // page is full, split to be managed by page owner
     iterator_type ub = search_ub(record);
     std::cout << "ub index: " << ub.index_ << std::endl;
     if (!allow_dup) {
