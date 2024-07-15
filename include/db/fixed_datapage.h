@@ -5,6 +5,7 @@
 #include <array>
 #include <bitset>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <fstream>
@@ -60,19 +61,19 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     std::ofstream file(path_, std::ios::binary | std::ios::out | std::ios::in);
     file.seekp(page_offset_);
     if (!file.write(reinterpret_cast<char*>(&this->next_page_offset_), sizeof(uintmax_t))) {
-      throw std::runtime_error("Failed to write next page offset");
+      std::cerr << "Error: Failed to write next page offset" << std::endl;
     }
     if (!file.write(reinterpret_cast<char*>(bitmap_.get()), sizeof(std::bitset<RECORD_COUNT>))) {
-      throw std::runtime_error("Failed to write bitmap");
+      std::cerr << "Error: Failed to write bitmap" << std::endl;
     }
     if (!file.write(reinterpret_cast<char*>(record_data_.get()), sizeof(RecordData))) {
-      throw std::runtime_error("Failed to write record data");
+      std::cerr << "Error: Failed to write record data" << std::endl;
     }
 
     size_t padding = PAGE_SIZE_CONST - sizeof(uintmax_t) - sizeof(std::bitset<RECORD_COUNT>) - sizeof(RecordData);
-    if (padding < 0)
-      throw std::runtime_error("Data exceeds page size.");
-    else if (padding > 0) {
+    if (padding < 0) {
+      std::cerr << "Error: Data exceeds page size." << std::endl;
+    } else if (padding > 0) {
       std::cout << "WARNING: Padding " << padding << " bytes to page" << std::endl;
       file.write(std::string(padding, '\0').c_str(), padding);
     }
@@ -238,8 +239,8 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
   iterator_type search(const KeyOrRecord& key_or_record) override {
     auto lb = search_lb(key_or_record);
-    if (!lb.has_value()) return end();
-    auto record_lb = *lb.value();
+    if (lb == end()) return end();
+    auto record_lb = *lb;
     if (std::memcmp(Base::get_data(key_or_record), record_lb.data(), Base::get_size(key_or_record)) == 0)
       return lb;
     else
@@ -252,17 +253,18 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     iterator_type ub = search_ub(record);
     std::cout << "ub index: " << ub.index_ << std::endl;
     if (!allow_dup) {
-      for (iterator_type it = ub; it < end(); --it) {
+      for (iterator_type it = ub; it >= begin(); --it) {
         if (get_bit(it) == true) {
-          if (std::equal(record.begin(), record.end(), (*it).begin()))
+          auto ret = std::memcmp(record.data(), (*it).data(), RECORD_SIZE);
+          if (ret == 0)
             return {it++, false};  // It should have been inserted here, but cannot because of duplicate ahead of it.
-          break;
+          else if (ret < 0) break;
         }
       }
     }
 
     if (get_bit(ub) == false) {
-      (*ub).swap(const_cast<Record&>(record));
+      std::copy(record.begin(), record.end(), (*ub).begin());
       set_bit(ub, true);
       return {ub, true};
     }
@@ -299,28 +301,26 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
       // leaving an empty seat at ub, which should be set to true
     }
     set_bit(ub, true);
-    (*ub).swap(record);
+    std::copy(record.begin(), record.end(), (*ub).begin());
     return {ub, true};
   }
 
  private:
   // No element shifting, which only happens at insertions
-  std::optional<iterator_type> erase(size_t index) {
+  iterator_type erase(size_t index) {
     if ((*bitmap_)[index]) {
       // will be cleaned when elements shift during insertions
       (*bitmap_)[index] = false;
       return iterator_type(this, index);
     }
-    return std::nullopt;
+    return end();
   }
 
  public:
-  std::optional<iterator_type> erase(iterator_type it) override { return erase(it.index_); }
+  iterator_type erase(iterator_type it) override { return erase(it.index_); }
 
-  std::optional<iterator_type> erase(const Record& record) override {
-    auto found = search(record);
-    if (!found.has_value()) return std::nullopt;
-    return erase(found.value());
+  iterator_type erase(const Record& record) override {
+    return erase(search(record));
   }
 
   bool is_full() override { return bitmap_->count() == RECORD_COUNT; }
@@ -335,42 +335,42 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
     assert(right_sibling_self->bitmap_->none());
 
-    size_t mid = find_first_occupied(RECORD_COUNT / 2);
-    size_t right_index = 0;
+    auto empty_start = solidify();
 
-    // Move records from the middle to the end of the current page to the right_sibling
-    for (size_t i = mid; i < RECORD_COUNT; ++i) {
-      if ((*bitmap_)[i] == 1) {
-        right_sibling_self->get_record(right_index)->swap(*get_record(i));
-        (*bitmap_)[i] = 0;
-        (*right_sibling_self->bitmap_)[right_index] = 1;
-        ++right_index;
-      }
-    }
+    assert(empty_start * 1.1 >= RECORD_COUNT);
+
+    size_t left_size = RECORD_COUNT / 2;
+    size_t right_size = size() - left_size;
+    
+    std::move(record_data_->begin() + left_size * RECORD_SIZE, record_data_->end(), right_sibling_self->record_data_->begin());
+
+    bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>(bitmap_->set() << (RECORD_COUNT - left_size));
+    right_sibling_self->bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>(right_sibling_self->bitmap_->set() << (RECORD_COUNT - right_size));
 
     // Return the key of the middle record
-    return copy_key(mid);
+    return right_sibling->copy_min_key();
   }
 
   // Place all valid records at the beginning of the page
   // Returning the start of empty space
   size_t solidify() {
     size_t free_spots_trailing = 0;
-    auto bitmap_it = bitmap_->end() - 1;
-    while (bitmap_it >= bitmap_->begin() && *bitmap_it == 0) {
-      ++free_spots_trailing;
-      --bitmap_it;
+    for (size_t i = RECORD_COUNT - 1; i >= 0; ++i) {
+      if (!bitmap_->test(i)) {
+        free_spots_trailing++;
+      } else {
+        break;
+      }
     }
     for (size_t i = 0; i < RECORD_COUNT; i++) {
       if (!bitmap_->test(i)) {
         std::move(record_data_->begin() + (i + 1) * RECORD_SIZE, record_data_->end(), record_data_->begin() + i * RECORD_SIZE);
-        std::fill(record_data_->end() - RECORD_SIZE, record_data_->end(), "\0");
-        std::move(bitmap_->begin() + i + 1, bitmap_->end(), bitmap_->begin() + i);
-        std::fill(bitmap_->end() - 1, bitmap_->end(), 0);
+        std::fill(record_data_->end() - RECORD_SIZE, record_data_->end(), static_cast<unsigned char>('\0'));
         free_spots_trailing++;
         --i;  // Recheck the current index
       }
     }
+    bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>(bitmap_->set() << free_spots_trailing);
     return RECORD_COUNT - free_spots_trailing;
   }
 
@@ -380,9 +380,9 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     size_t target_size = size() + right_sibling_self->size();
     assert(target_size <= max_size());
     auto empty_start = solidify();
-    auto right_empty_start = right_sibling_self->solidify();
+    right_sibling_self->solidify();
     std::move(right_sibling_self->record_data_->begin(), right_sibling_self->record_data_->end(), record_data_->begin() + empty_start * RECORD_SIZE);
-    std::move(right_sibling_self->bitmap_->begin(), right_sibling_self->bitmap_->end(), bitmap_->begin() + empty_start);
+    bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>(*bitmap_ | *(right_sibling_self->bitmap_) >> empty_start);
     assert(size() == target_size);
     assert(verify_order());
   }
@@ -404,10 +404,13 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     std::move(right_sibling_self->record_data_->begin(),
               right_sibling_self->record_data_->begin() + to_move * RECORD_SIZE,
               record_data_->begin() + left_empty_start * RECORD_SIZE);
-    std::move(right_sibling_self->bitmap_->begin(), right_sibling_self->bitmap_->begin() + to_move, bitmap_->begin() + left_empty_start);
+    bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>(*bitmap_ | 
+    *(right_sibling_self->bitmap_) >> (RECORD_COUNT - to_move) // keep the first to_move bits
+    << (RECORD_COUNT - left_empty_start - to_move)); // shift to the right position
     // Fill moved records in right sibling with null
-    std::fill((right_sibling_self->record_data_->begin(), right_sibling_self->record_data_->begin() + to_move * RECORD_SIZE, "\0"));
-    std::fill(right_sibling_self->bitmap_->begin(), right_sibling_self->bitmap_->begin() + to_move, 0);
+    std::fill(right_sibling_self->record_data_->begin(), right_sibling_self->record_data_->begin() + to_move * RECORD_SIZE, '\0');
+    std::bitset<RECORD_COUNT> mask = std::bitset<RECORD_COUNT>().set() >> to_move;
+    right_sibling_self->bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>(*(right_sibling_self->bitmap_) & mask);
     assert(size() == target_left_size);
     assert(verify_order());
     return right_sibling->copy_min_key();

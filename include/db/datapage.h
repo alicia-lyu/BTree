@@ -138,8 +138,8 @@ class DataPage {
 
   virtual std::pair<iterator_type, bool> insert(const Record& record, bool allow_dup = true) = 0;
 
-  virtual std::optional<iterator_type> erase(iterator_type it) = 0;
-  virtual std::optional<iterator_type> erase(const Record& record) = 0;
+  virtual iterator_type erase(iterator_type it) = 0;
+  virtual iterator_type erase(const Record& record) = 0;
 
   virtual bool is_full() = 0;
 

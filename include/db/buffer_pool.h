@@ -52,7 +52,7 @@ class BufferPool {
     if (it != page_map_.end()) {
       // Move accessed page to the front of the list
       pages_.splice(pages_.begin(), pages_, it->second);
-      return it->second->second;
+      return it->second->second.get();
     }
     // Load page if not found
     if (pages_.size() == max_pages_) {
@@ -81,7 +81,7 @@ class BufferPool {
   }
 
   void discard_page(uintmax_t offset) {
-    for (auto page: pages_) {
+    for (auto &page: pages_) {
         if (page.first == offset) {
             page_map_.erase(offset);
             pages_.remove(page);

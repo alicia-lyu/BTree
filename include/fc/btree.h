@@ -446,7 +446,7 @@ requires(Fanout >= 2) class BTreeBase {
         return nullptr;
       }
       if (node_->is_leaf()) {
-        assert(node_->children_.size() >= index_ + 2);
+        assert(node_->children_.size() >= (size_t) index_ + 2);
         return node_->children_[index_ + 1].get();
       } else {
         Node * next_leaf = leftmost_leaf(node_->children_[index_ + 1].get());
@@ -1722,7 +1722,7 @@ public:
       Node * leftmost_page = it_begin.node_->children_[0].get();
       return {cbegin(), leftmost_page};
     }
-    for (iterator_type it = lb; it < ub; ++it) {
+    for (iterator_type it = lb; it != ub; ++it) {
       Node* page = it.get_page();
       if (page->page_index_ == page_index) {
         assert(page->get_page_key() == key);

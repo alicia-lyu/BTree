@@ -66,19 +66,19 @@ class DBBTree {
    private:
     PageType* page_;
     typename PageType::iterator_type page_iter_;
-    DBBTree* tree_;
+    BufferPool<PageType> * buffer_pool_;
 
     void increment() noexcept {
       ++page_iter_;
       if (page_iter_ != page_->end()) return;
       auto next_page_offset = page_->next_page_offset_;
       if (next_page_offset == std::numeric_limits<uintmax_t>::max()) return;  // end of the tree
-      page_ = tree_->buffer_pool_.get_page(next_page_offset).get();
+      page_ = buffer_pool_->get_page(next_page_offset);
       page_iter_ = page_->begin();
     }
 
    public:
-    DBBTreeIterator(PageType* page, typename PageType::iterator_type page_iter, DBBTree* tree) noexcept : page_{page}, page_iter_{page_iter}, tree_{tree} {}
+    DBBTreeIterator(PageType* page, typename PageType::iterator_type page_iter, BufferPool<PageType> * buffer_pool) noexcept : page_{page}, page_iter_{page_iter}, buffer_pool_(buffer_pool) {}
 
     DBBTreeIterator() = delete;
 
@@ -145,25 +145,29 @@ class DBBTree {
     return offset / PageType::PAGE_SIZE_CONST;
   }
 
+  iterator make_it(PageType* page, typename PageType::iterator_type page_iter) {
+    return iterator(page, page_iter, &buffer_pool_);
+  }
+
   iterator search_lb(const key_type& key) {
     auto [btree_it, node] = btree_.find_page_lb(key);
 
-    auto offset = translate_offset(node->page_index_);
-    auto& page = buffer_pool_.get_page(offset);
+    auto offset = translated_offset(node->page_index_);
+    auto page = buffer_pool_.get_page(offset);
 
     auto page_it = page->search_lb(key);
     if (page_it == page->end()) {
       assert(node->is_min_page());
       return end();
     } else {
-      return iterator(page.get(), *page_it);
+      return make_it(page, page_it);
     }
   }
 
   iterator search_ub(const key_type& key) {
     auto [btree_it, node] = btree_.find_page_ceil(key);
 
-    auto offset = translate_offset(node->page_index_);
+    auto offset = translated_offset(node->page_index_);
     auto& page = buffer_pool_.get_page(offset);
 
     auto page_it = page->search_ub(key);
@@ -171,7 +175,7 @@ class DBBTree {
       assert(btree_it == std::prev(btree_.end()));
       return end();
     } else {
-      return iterator(page.get(), *page_it);
+      return make_it(page.get(), page_it);
     }
   }
 
@@ -186,37 +190,57 @@ class DBBTree {
       }
       ++lb;
     }
+    return end();
   }
 
   std::pair<iterator, bool> insert(const value_type& record) {
     auto key = PageType::extract_key(record);
-    auto [btree_it, target_node] = btree_.find_page(key);
-    auto& target_page = buffer_pool_.get_page(translated_offset(target_node->page_index_));
+    auto [btree_it, node] = btree_.find_page_lb(key);
+    auto page = buffer_pool_.get_page(translated_offset(node->page_index_));
+    auto it = make_it(page, page->search_lb(key));
+    while (it != end() && std::memcmp(&record, &*it, sizeof(record)) > 0) {
+      ++it;
+    }
+    if constexpr (!AllowDup) {
+      if (it != end() && std::memcmp(&record, &*it, sizeof(record)) == 0) {
+        return {it, false};
+      }
+    }
+    if (it == end()) return {it, false};
+    auto target_page = it.get_page();
     if (target_page->is_full()) {
       auto [new_page, new_offset] = buffer_pool_.get_new_page();
       key_type mid_key = target_page->split_with(new_page);
-      btree_.insert(mid_key, translated_index(new_offset));
+      btree_.insert_page(mid_key, translated_index(new_offset));
       if (std::memcmp(&key, &mid_key, sizeof(key)) >= 0) {
         target_page = std::move(new_page);
       }
     }
     auto [page_it, inserted] = target_page->insert(record);
-    return {iterator(target_page.get(), page_it), inserted};
+    return {make_it(target_page, page_it), inserted};
   }
 
-  std::optional<iterator> erase(const value_type& record) {
+  iterator erase(const value_type& record) {
     auto key = PageType::extract_key(record);
     auto [btree_it, target_node] = btree_.find_page(key);
     auto& target_page = buffer_pool_.get_page(translated_offset(target_node->page_index_));
     auto page_it = target_page->erase(record);
     inspect_after_erase(page_it);
-    return page_it.has_value() ? std::make_optional(iterator(target_page.get(), *page_it)) : std::nullopt;
+    if (page_it == target_page->end()) {
+      return end();
+    } else {
+      return make_it(target_page, page_it);
+    }
   }
 
-  std::optional<iterator> erase(iterator it) {
+  iterator erase(iterator it) {
     auto page_it = it.get_page()->erase(it.get_page_iter());
     inspect_after_erase(page_it);
-    return page_it.has_value() ? std::make_optional(iterator(it.get_page(), *page_it)) : std::nullopt;
+    if (page_it == it.get_page()->end()) {
+      return end();
+    } else {
+      return make_it(it.get_page(), page_it);
+    }
   }
 
   PageType::iterator_type inspect_after_erase(PageType::iterator_type it) {
@@ -239,28 +263,20 @@ class DBBTree {
     return it;
   }
 
-  iterator begin() { return iterator(const_cast<DBBTree<AllowDup, Fanout, PageType>>(this).begin()); }
-
-  iterator end() { return iterator(const_cast<DBBTree<AllowDup, Fanout, PageType>>(this).end()); }
-
-  const_iterator begin() const {
+  iterator begin() { 
     auto btree_begin = btree_.begin();
     if (btree_begin == btree_.end()) return end();
-    auto leftmost_page = btree_begin.node_.children_[0].get();
-    return const_iterator(leftmost_page, leftmost_page->begin());
+    auto leftmost_page = buffer_pool_.get_page(translated_offset(btree_begin.node_->children_[0]->page_index_));
+    return make_it(leftmost_page, leftmost_page->begin());
   }
 
-  const_iterator end() const {
+  iterator end() {
     auto btree_last = btree_.end()--;
-    auto rightmost_page = btree_last.node_.children_.back().get();
-    return const_iterator(rightmost_page, rightmost_page->end());
+    auto rightmost_page = buffer_pool_.get_page(
+     translated_offset(btree_last.node_->children_.back()->page_index_) 
+    );
+    return make_it(rightmost_page, rightmost_page->end());
   }
-
-  const_iterator cbegin() const { return begin(); }
-
-  const_iterator cend() const { return end(); }
-
-  // Additional methods for full STL-like interface...
 };
 
 #endif  // DB_BTREE_H
