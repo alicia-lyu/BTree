@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <iostream>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 
 template <size_t PAGE_SIZE, size_t RECORD_SIZE, size_t KEY_SIZE>
@@ -33,10 +34,17 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   uintmax_t page_offset_;
 
  public:
-  FixedRecordDataPage(std::filesystem::path p, uintmax_t file_offset) : path_(p), page_offset_(file_offset) {
+  FixedRecordDataPage(std::filesystem::path p, uintmax_t file_offset, std::optional<uintmax_t> next_page_offset = std::nullopt) : path_(p), page_offset_(file_offset) {
+    
     if (file_offset == 0) throw std::runtime_error("Metadata offset");
     bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>();
     record_data_ = std::make_unique<RecordData>();
+
+    if (next_page_offset != std::nullopt) {
+      this->next_page_offset_ = next_page_offset.value();
+      return;
+    }
+
     std::ifstream file(p, std::ios::binary | std::ios::in);
     file.seekg(file_offset);
     assert(sizeof(uintmax_t) + sizeof(std::bitset<RECORD_COUNT>) + sizeof(RecordData) <= PAGE_SIZE);
@@ -346,6 +354,8 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
     bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>(bitmap_->set() << (RECORD_COUNT - left_size));
     right_sibling_self->bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>(right_sibling_self->bitmap_->set() << (RECORD_COUNT - right_size));
+    right_sibling->next_page_offset_ = this->next_page_offset_;
+    this->next_page_offset_ = right_sibling_self->page_offset_;
 
     // Return the key of the middle record
     return right_sibling->copy_min_key();
@@ -383,6 +393,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     right_sibling_self->solidify();
     std::move(right_sibling_self->record_data_->begin(), right_sibling_self->record_data_->end(), record_data_->begin() + empty_start * RECORD_SIZE);
     bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>(*bitmap_ | *(right_sibling_self->bitmap_) >> empty_start);
+    this->next_page_offset_ = right_sibling->next_page_offset_;
     assert(size() == target_size);
     assert(verify_order());
   }

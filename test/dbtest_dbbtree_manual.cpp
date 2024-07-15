@@ -1,11 +1,9 @@
+#include <cstddef>
 #include <iostream>
 #include <array>
 #include <filesystem>
 #include <cassert>
 #include <string>
-#include <random>
-#include <vector>
-#include <numeric>
 
 #include "db/db_btree.h"
 #include "db/buffer_pool.h"
@@ -109,21 +107,27 @@ void test_BufferPool() {
     std::filesystem::remove(pages_path);
 
     // Create BufferPool instance
-    BufferPool<FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>> buffer_pool(2, pages_path);
+    BufferPool<FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>> buffer_pool(50, pages_path);
 
+    std::vector<uintmax_t> page_offsets;
     // Simulate getting pages
-    auto page1 = buffer_pool.get_page(0);
-    auto page2 = buffer_pool.get_page(PAGE_SIZE);
+    for (size_t i = 0; i < 100; ++i) {
+        auto page = buffer_pool.get_new_page(page_offsets.empty() ? PAGE_SIZE : page_offsets.back() + PAGE_SIZE);
+        assert(page.first.use_count() == 2);
+        page_offsets.push_back(page.second);
+    }
 
-    // Insert records into pages
-    page1->insert(create_sample_record(1));
-    page2->insert(create_sample_record(2));
+    auto offset_it = page_offsets.begin();
+    while (offset_it < page_offsets.begin() + 50) {
+        assert(!buffer_pool.query_page(*offset_it));
+        ++offset_it;
+    }
+        
+    while (offset_it < page_offsets.end()) {
+        assert(buffer_pool.query_page(*offset_it));
+        ++offset_it;
+    }
 
-    // Validate LRU functionality by accessing pages and checking eviction
-    auto page3 = buffer_pool.get_page(PAGE_SIZE * 2);
-    page3->insert(create_sample_record(3));
-    assert(buffer_pool.get_page(0) != nullptr); // Should not be evicted
-    assert(buffer_pool.get_page(PAGE_SIZE) == nullptr); // Should be evicted
     std::cout << "BufferPool test passed." << std::endl;
 }
 
