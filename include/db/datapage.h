@@ -57,7 +57,7 @@ class DataPage {
 
   static Key extract_key(const Record & record) {
     Key key;
-    std::copy(record.begin(), record.end(), key.begin());
+    std::copy(record.begin(), record.begin() + key.size(), key.begin());
     return key;
   }
 

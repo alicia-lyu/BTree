@@ -123,7 +123,9 @@ template <Containable K, typename V, attr_t Fanout, typename Comp,
           bool AllowDup, template <typename T> class AllocTemplate>
 requires(Fanout >= 2) class BTreeBase {
 
+public:
   struct Node;
+private:
   using Alloc = AllocTemplate<Node>;
 
   struct Deleter {
@@ -163,6 +165,7 @@ requires(Fanout >= 2) class BTreeBase {
       false;
 #endif // FC_USE_SIMD
 
+public:
 #if FC_USE_SIMD
   struct alignas(64) Node {
 #else
@@ -357,6 +360,8 @@ requires(Fanout >= 2) class BTreeBase {
       }
     }
   };
+
+private:
 
   struct BTreeNonConstIterTraits {
     using difference_type = attr_t;
@@ -1764,7 +1769,7 @@ public:
 
   std::pair<const_iterator_type, Node *> find_page_ceil(const K& key) const {
     auto ub = find_upper_bound(key);
-    if (ub == cend()) {
+    if (ub == cend()) { // no upper bound to key, return the rightmost page
       auto it_end = cend();
       Node * rightmost_page = std::prev(it_end).get_page();
       // Potentially any arbitrarily large record can be placed here
@@ -1772,6 +1777,8 @@ public:
       // Could be nullptr if the tree is empty
       return {std::prev(it_end), rightmost_page};
     }
+    // the ceiling page that key can be placed in is ub's left page
+    --ub;
     Node* page = ub.get_page();
     return {ub, page};
   }

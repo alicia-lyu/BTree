@@ -2,6 +2,7 @@
 #define BUFFER_POOL_H
 
 #include <cstdint>
+#include <limits>
 #include <list>
 #include <optional>
 #include <unordered_map>
@@ -95,7 +96,7 @@ class BufferPool {
 
   bool query_page(uintmax_t offset) { return page_map_.find(offset) != page_map_.end(); }
 
-  std::pair<PagePtr, uintmax_t> get_new_page(uintmax_t next_page_offset) {
+  std::pair<PagePtr, uintmax_t> get_new_page(uintmax_t next_page_offset = std::numeric_limits<uintmax_t>::max()) {
     uintmax_t new_offset;
     if (empty_pages_start + PageType::PAGE_SIZE_CONST <= file_size_) {
       new_offset = empty_pages_start;

@@ -114,21 +114,25 @@ add_executable(fc_benchmarks
 #     test/dbtest_fixed_page.cpp
 # )
 
-# add_executable(dbtests_manual_fixed_page
-#     test/dbtest_fixed_page_manual.cpp
-# )
-
 add_executable(dbtests_manual_page_node
     test/dbtest_page_node_manual.cpp
 )
 
 add_executable(dbtests_manual_dbbtree
+    test/dbtest_helper.h
+    test/dbtest_helper.cpp
     test/dbtest_dbbtree_manual.cpp
 )
 
+add_executable(dbtests_manual_fixed_page
+    test/dbtest_helper.h
+    test/dbtest_helper.cpp
+    test/dbtest_fixed_page_manual.cpp
+)
+
 set(CATCH2_EXECUTABLES fc_tests fc_benchmarks)
-set(MANUAL_EXECUTABLES dbtests_manual_page_node dbtests_manual_dbbtree)
-set(DB_EXECUTABLES dbtests_manual_page_node dbtests_manual_dbbtree)
+set(MANUAL_EXECUTABLES dbtests_manual_page_node dbtests_manual_dbbtree dbtests_manual_fixed_page)
+set(DB_EXECUTABLES dbtests_manual_page_node dbtests_manual_dbbtree dbtests_manual_fixed_page)
 set(TEST_EXECUTABLES ${CATCH2_EXECUTABLES} ${MANUAL_EXECUTABLES})
 message(STATUS "TEST_EXECUTABLES: ${TEST_EXECUTABLES}")
 
