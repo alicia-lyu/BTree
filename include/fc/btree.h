@@ -226,7 +226,7 @@ requires(Fanout >= 2) class BTreeBase {
       page_index_ = page_index;
     }
 
-    void transform_to_min_page() noexcept {
+    void transform_to_placeholder_page() noexcept {
       assert(empty());
       assert(children_.empty());
       assert(height_ == 0);
@@ -294,7 +294,7 @@ requires(Fanout >= 2) class BTreeBase {
       return page_index_ != std::numeric_limits<attr_t>::max();
     }
 
-    [[nodiscard]] bool is_min_page() const {
+    [[nodiscard]] bool is_placeholder_page() const {
       return page_index_ == std::numeric_limits<attr_t>::min();
     }
 
@@ -443,27 +443,25 @@ requires(Fanout >= 2) class BTreeBase {
     }
 
     Node * get_page() const noexcept {
-      if (index_ == node_->nkeys()) {
+      if (index_ == node_->nkeys()) { // reaches end()
         return nullptr;
       }
       if (node_->is_leaf()) {
-        assert(node_->children_.size() >= (size_t) index_ + 2);
-        return node_->children_[index_ + 1].get();
+        if (node_->children_.size() >= (size_t) index_ + 2)
+          return node_->children_[index_ + 1].get();
+        else return nullptr;
       } else {
         Node * next_leaf = leftmost_leaf(node_->children_[index_ + 1].get());
-        assert(next_leaf->children_.front());
-        return next_leaf->children_.front().get();
+        if (next_leaf->children_.empty()) {
+          return nullptr;
+        } else return next_leaf->children_.front().get();
       }
     }
 
     Node* get_next_page() const noexcept {
         BTreeIterator temp = *this;
         temp.increment();
-        try {
-          return temp.get_page();
-        } catch (std::exception &e) {
-          return nullptr;
-        }
+        return temp.get_page();
     }
 
     void increment() noexcept {
@@ -1729,14 +1727,17 @@ public:
     const_iterator_type lb = find_lower_bound(key);
     if (lb == cend()) {
       auto it_begin = cbegin();
-      if (!it_begin.node_->fathers_nodes_or_pages()) {
-        return {cend(), nullptr};
-      }
-      Node * leftmost_page = it_begin.node_->children_[0].get();
+      assert(it_begin.node_->is_leaf());
+      assert(!it_begin.node_->children_.empty() || size() == 0);
+      // Only returning nullptr page if the tree is empty
+      Node * leftmost_page = it_begin.node_->children_.empty() ? nullptr : it_begin.node_->children_[0].get();
+      // The leftmost page can potentially hold any key arbitrarily small
+      // But it may be nullptr if the tree is empty
       return {cbegin(), leftmost_page};
     }
     for (const_iterator_type it = lb; it != cend(); ++it) {
       Node* page = it.get_page();
+      assert(page); // Page must be inserted when the key is
       if (page->page_index_ == page_index) {
         assert(page->get_page_key() == key);
         return {it, page};
@@ -1751,11 +1752,10 @@ public:
   std::pair<const_iterator_type, Node *> find_page_lb(const K& key) const {
     auto lb = find_lower_bound(key);
     if (lb == cend()) {
+      // No lower bound, but the leftmost page can potentially hold any key arbitrarily small
       auto it_begin = cbegin();
-      if (!it_begin.node_->fathers_nodes_or_pages()) {
-        return {cend(), nullptr};
-      }
-      Node * leftmost_page = it_begin.node_->children_[0].get();
+      assert(!it_begin.node_->children_.empty() || size() == 0);
+      Node * leftmost_page = it_begin.node_->children_.empty() ? nullptr : it_begin.node_->children_[0].get();
       return {cbegin(), leftmost_page};
     }
     Node* page = lb.get_page();
@@ -1766,7 +1766,10 @@ public:
     auto ub = find_upper_bound(key);
     if (ub == cend()) {
       auto it_end = cend();
-      Node * rightmost_page = std::prev(it_end).get_page(); // Potentially any arbitrarily large record can be placed here, could be nullptr
+      Node * rightmost_page = std::prev(it_end).get_page();
+      // Potentially any arbitrarily large record can be placed here
+      assert(rightmost_page || size() == 0);
+      // Could be nullptr if the tree is empty
       return {std::prev(it_end), rightmost_page};
     }
     Node* page = ub.get_page();
@@ -1856,7 +1859,7 @@ protected:
     assert(size() == 0);
     assert(!root_->fathers_nodes_or_pages());
     auto page = make_node();
-    page->transform_to_min_page();
+    page->transform_to_placeholder_page();
     page->parent_ = root_.get();
     page->index_ = 0;
     root_->children_.push_back(std::move(page));
@@ -2009,7 +2012,7 @@ public:
   const_iterator_type erase_page(const K &key_lb, attr_t page_index) {
     auto [it, page] = find_page(key_lb, page_index);
     if (page == nullptr) return cend();
-    assert(!page->is_min_page());
+    assert(!page->is_placeholder_page());
     return erase(it);
   }
 

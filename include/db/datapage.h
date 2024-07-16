@@ -143,9 +143,9 @@ class DataPage {
 
   virtual bool is_full() = 0;
 
-  virtual Key split_with(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
+  virtual Record split_with(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
   virtual void merge_with(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
-  virtual Key borrow_from(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
+  virtual Record borrow_from(DataPage<PAGE_SIZE, Record, Key>* right_sibling) = 0;
 
   virtual bool verify_order() = 0;
 

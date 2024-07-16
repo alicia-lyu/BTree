@@ -264,29 +264,33 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
   std::pair<iterator_type, bool> insert(const Record& record, bool allow_dup = true) override {
     if (bitmap_->count() == RECORD_COUNT) return {end(), false};  // page is full, split to be managed by page owner
-    iterator_type ub = search_ub(record);
-    // std::cout << "ub index: " << ub.index_ << std::endl;
+    
+    iterator_type ub = end();
     if (!allow_dup) {
-      for (iterator_type it = ub; it >= begin(); --it) {
-        if (get_bit(it) == true) {
-          auto ret = std::memcmp(record.data(), (*it).data(), RECORD_SIZE);
-          if (ret == 0)
-            return {it++, false};  // It should have been inserted here, but cannot because of duplicate ahead of it.
-          else if (ret < 0)
-            break;
-        }
+      iterator_type lb = search_lb(record);
+      if (lb != end()) {
+        auto ret = std::memcmp(record.data(), (*lb).data(), RECORD_SIZE);
+        if (ret == 0) return {lb, false};
       }
+      ub = lb++;
+    } else {
+      ub = search_ub(record);
+    }
+
+    if (ub == end()) {
+      size_t empty_index = solidify();
+      ub = iterator_type(this, empty_index);
     }
 
     if (get_bit(ub) == false) {
-      std::copy(record.begin(), record.end(), (*ub).begin());
+      std::copy(record.begin(), record.end(), ub->begin());
       set_bit(ub, true);
       return {ub, true};
     }
     // Moving elements is inevitable
     // Erasing from the tail is more efficient
     bool before_ub = false;
-    auto it = end() - 1;
+    auto it = --end();
     while (it >= begin()) {
       if (!get_bit(it)) {
         if (it < ub) before_ub = true;
@@ -297,26 +301,31 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     // Bitmap knows nothing about insertion and erasion yet.
     // LATER: Migrate to std::shift_left and std::shift_right
     if (before_ub) {
-      --ub;
       // all bits between (records_it, ub-1] need to shift 1 pos forward, overwriting bitmap[records_it]
+      std::move(
+        record_data_->begin() + (it.index_ + 1) * RECORD_SIZE,
+        record_data_->begin() + ub.index_ * RECORD_SIZE,
+        record_data_->begin() + (it.index_) * RECORD_SIZE);
+      --ub;
       while (it < ub) {
-        set_bit(it, get_bit(it + 1));
-        std::copy((*(it + 1)).begin(), (*(it + 1)).end(), (*it).begin());
+        set_bit(it, get_bit(it));
         ++it;
       }
       // leaving an empty seat at ub-1, which should be set to true
-
     } else {
       // all bit between [ub, records_it) need to shift 1 pos backward, overwriting bitmap[records_it]
+      std::move(
+        record_data_->begin() + ub.index_ * RECORD_SIZE,
+        record_data_->begin() + it.index_ * RECORD_SIZE,
+        record_data_->begin() + (ub.index_ + 1) * RECORD_SIZE);
       while (it > ub) {
         set_bit(it, get_bit(it - 1));
-        std::copy((*(it - 1)).begin(), (*(it - 1)).end(), (*it).begin());
         --it;
       }
       // leaving an empty seat at ub, which should be set to true
     }
     set_bit(ub, true);
-    std::copy(record.begin(), record.end(), (*ub).begin());
+    std::copy(record.begin(), record.end(), ub->data());
     return {ub, true};
   }
 
@@ -341,7 +350,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   // Returns the key to copy up and insert into the tree
   // Operate on the assumption that a datapage is (almost) full when it must split, DERERRED to caller to ensure that
   // Otherwise, unexpected behavior when the bitmap is skewed.
-  Key split_with(Base* right_sibling) override {
+  Record split_with(Base* right_sibling) override {
     // Perform a dynamic_cast to check if right_sibling is of type Self
     Self* right_sibling_self = dynamic_cast<Self*>(right_sibling);
     assert(right_sibling_self && "right_sibling is not of the correct type");
@@ -373,22 +382,12 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     assert(size() + right_sibling_self->size() == total_size);
 
     // Return the key of the middle record
-    return right_sibling->copy_min_key();
+    return *(right_sibling->min());
   }
 
   // Place all valid records at the beginning of the page
   // Returning the start of empty space
   size_t solidify() {
-    size_t free_spots_trailing = 0;
-    // Identify trailing free spots
-    for (size_t i = RECORD_COUNT; i > 0; --i) {
-      if (!bitmap_->test(i - 1)) {
-        free_spots_trailing++;
-      } else {
-        break;
-      }
-    }
-
     // Move valid records to the beginning
     size_t dest_index = 0;
     for (size_t src_index = 0; src_index < RECORD_COUNT; ++src_index) {
@@ -405,15 +404,15 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
       }
     }
 
-    for (size_t i = 0; i < RECORD_COUNT; ++i) {
-      if (i < RECORD_COUNT - free_spots_trailing) {
-        bitmap_->set(i);
-      } else {
-        bitmap_->reset(i);
-      }
+    for (size_t i = 0; i < dest_index; ++i) {
+      bitmap_->set(i);
     }
 
-    return RECORD_COUNT - free_spots_trailing;
+    for (size_t i = dest_index; i < RECORD_COUNT; ++i) {
+      bitmap_->reset(i);
+    }
+
+    return dest_index;
   }
 
   void merge_with(Base* right_sibling) override {
@@ -444,7 +443,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   }
 
   // When the current page is less than half full, redistribute records from the right sibling
-  Key borrow_from(Base* right_sibling) override {
+  Record borrow_from(Base* right_sibling) override {
     Self* right_sibling_self = dynamic_cast<Self*>(right_sibling);
     assert(right_sibling_self && "right_sibling is not of the correct type");
 
@@ -474,7 +473,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     assert(size() == target_left_size);
     assert(verify_order());
 
-    return right_sibling->copy_min_key();
+    return *(right_sibling->min());
   }
 
   bool verify_order() override {

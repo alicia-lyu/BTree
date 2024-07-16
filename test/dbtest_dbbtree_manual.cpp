@@ -24,8 +24,12 @@ Record create_sample_record(int id) {
     Record record = {};
     // Convert the integer to a string with leading zeros, fixed length
     std::string id_str = std::to_string(id);
-    id_str = std::string(RECORD_SIZE - id_str.length(), '0') + id_str; // Adjust 10 to your required length
-    std::copy(id_str.begin(), id_str.end(), record.data());
+    id_str = std::string(4 - id_str.length(), '0') + id_str; // Adjust 10 to your required length
+    for (size_t i = 0; i < RECORD_SIZE / 4; i++) {
+        std::copy(id_str.begin(), id_str.end(), record.begin() + i * 4);
+    }
+    size_t remaining = RECORD_SIZE - RECORD_SIZE / 4 * 4;
+    std::copy(id_str.begin(), id_str.begin() + remaining, record.end() - remaining);
     return record;
 }
 
@@ -34,8 +38,12 @@ Key create_sample_key(int id) {
     Key key = {};
     // Convert the integer to a string with leading zeros, fixed length
     std::string id_str = std::to_string(id);
-    id_str = std::string(KEY_SIZE - id_str.length(), '0') + id_str; // Adjust 10 to your required length
-    std::copy(id_str.begin(), id_str.end(), key.data());
+    id_str = std::string(4 - id_str.length(), '0') + id_str; // Adjust 10 to your required length
+    for (size_t i = 0; i < KEY_SIZE / 4; i++) {
+        std::copy(id_str.begin(), id_str.end(), key.begin() + i * 4);
+    }
+    size_t remaining = KEY_SIZE - KEY_SIZE / 4 * 4;
+    std::copy(id_str.begin(), id_str.begin() + remaining, key.end() - remaining);
     return key;
 }
 
@@ -63,12 +71,12 @@ void test_DBBTree_insert_search() {
     std::filesystem::remove(btree_path);
 
     // Create the DBBTree instance
-    DBBTree<false, 4, FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>> btree(pages_path, btree_path, MAX_PAGES);
+    DBBTree<true, 4, FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>> btree(pages_path, btree_path, MAX_PAGES);
 
     // Insert a record
     Record record = create_sample_record(1);
-    auto [it1, inserted] = btree.insert(record);
-    assert(inserted == true);
+    auto pair = btree.insert(record);
+    assert(pair.second == true);
 
     // Search for the inserted record
     auto it2 = btree.search(create_sample_record(1));

@@ -27,8 +27,8 @@ class DBBTree {
   using KeyOrRecord = std::variant<typename PageType::Key, typename PageType::Record>;
 
   std::filesystem::path btree_path_;
-  BTree btree_;
-  BufferPool<PageType> buffer_pool_;
+  std::unique_ptr<BTree> btree_;
+  std::unique_ptr<BufferPool<PageType>> buffer_pool_;
 
   struct DBBTreeNonConstIterTraits {
     using difference_type = std::ptrdiff_t;
@@ -122,16 +122,17 @@ class DBBTree {
   using attr_t = frozenca::attr_t;
 
   DBBTree(std::filesystem::path pages_path, std::filesystem::path btree_path, uint buffer_max_pages)
-      : btree_path_(btree_path), buffer_pool_(buffer_max_pages, pages_path) {
+      : btree_path_(btree_path), buffer_pool_(std::make_unique<BufferPool<PageType>>(buffer_max_pages, pages_path)) {
+    btree_ = std::make_unique<BTree>();
     if (std::filesystem::exists(btree_path)) {
       std::ifstream btree_file(btree_path, std::ios::binary);
-      btree_file >> btree_;
+      btree_file >> *btree_;
     }
   }
 
   ~DBBTree() {
     std::ofstream btree_file(btree_path_, std::ios::binary | std::ios::trunc);
-    btree_file << btree_;
+    btree_file << *btree_;
   }
 
   uintmax_t translated_offset(attr_t page_index) {  // page table
@@ -147,17 +148,17 @@ class DBBTree {
     return offset / PageType::PAGE_SIZE_CONST;
   }
 
-  iterator make_it(std::shared_ptr<PageType> page, typename PageType::iterator_type page_iter) { return iterator(page, page_iter, &buffer_pool_); }
+  iterator make_it(std::shared_ptr<PageType> page, typename PageType::iterator_type page_iter) { return iterator(page, page_iter, buffer_pool_.get()); }
 
   iterator search_lb(const key_type& key) {
-    auto [btree_it, node] = btree_.find_page_lb(key);
+    auto [btree_it, node] = btree_->find_page_lb(key);
 
     auto offset = translated_offset(node->page_index_);
-    std::shared_ptr<PageType> page = buffer_pool_.get_page(offset);
+    std::shared_ptr<PageType> page = buffer_pool_->get_page(offset);
 
     auto page_it = page->search_lb(key);
     if (page_it == page->end()) {
-      assert(node->is_min_page());
+      assert(node->is_placeholder_page());
       return end();
     } else {
       return make_it(page, page_it);
@@ -165,14 +166,14 @@ class DBBTree {
   }
 
   iterator search_ub(const key_type& key) {
-    auto [btree_it, node] = btree_.find_page_ceil(key);
+    auto [btree_it, node] = btree_->find_page_ceil(key);
 
     auto offset = translated_offset(node->page_index_);
-    std::shared_ptr<PageType> page = buffer_pool_.get_page(offset);
+    std::shared_ptr<PageType> page = buffer_pool_->get_page(offset);
 
     auto page_it = page->search_ub(key);
     if (page_it == page->end()) {
-      assert(btree_it == std::prev(btree_.end()));
+      assert(btree_it == std::prev(btree_->end()));
       return end();
     } else {
       return make_it(page.get(), page_it);
@@ -195,42 +196,49 @@ class DBBTree {
 
   std::pair<iterator, bool> insert(const value_type& record) {
     auto key = PageType::extract_key(record);
-    auto [btree_it, node] = btree_.find_page_lb(key);
+    auto [btree_it, node] = btree_->find_page_lb(key);
+
     auto next_page_node = btree_it.get_next_page();
-    assert(!next_page_node->is_min_page());
-    auto next_page_offset = next_page_node == nullptr ? std::numeric_limits<uintmax_t>::max() : translated_offset(next_page_node->page_index_);
-
-    std::shared_ptr<PageType> page = node == nullptr || node->is_min_page() ? 
-    buffer_pool_.get_new_page(next_page_offset).first : 
-    buffer_pool_.get_page(translated_offset(node->page_index_));
-
-    iterator it = make_it(page, page->search_lb(key));
-    while (it != end() && std::memcmp(&record, &*it, sizeof(record)) > 0) {
-      ++it;
+    uintmax_t next_page_offset = std::numeric_limits<uintmax_t>::max();
+    if (next_page_node) {
+      assert(!next_page_node->is_placeholder_page()); // only the leftmost page can be placeholder
+      next_page_offset = translated_offset(next_page_node->page_index_);
     }
-    if constexpr (!AllowDup) {
-      if (it != end() && std::memcmp(&record, &*it, sizeof(record)) == 0) {
-        return {it, false};
+
+    std::shared_ptr<PageType> page;
+    uintmax_t page_offset;
+
+    if (!node) {
+      std::tie(page, page_offset) = buffer_pool_->get_new_page(next_page_offset);
+      btree_->insert_page(key, translated_index(page_offset));
+    } else if (node->is_placeholder_page()) {
+      std::tie(page, page_offset) = buffer_pool_->get_new_page(next_page_offset);
+      node->page_index_ = translated_index(page_offset);
+    } else {
+      page_offset = translated_offset(node->page_index_);
+      page = buffer_pool_->get_page(page_offset);
+    }
+
+    if (page->is_full()) {
+      auto [new_page, new_offset] = buffer_pool_->get_new_page(page->next_page_offset_);
+      value_type mid_val = page->split_with(new_page.get());
+      btree_->insert_page(PageType::extract_key(mid_val), translated_index(new_offset));
+      if (std::memcmp(&record, &mid_val, sizeof(record)) >= 0) {
+        page = std::move(new_page);
       }
     }
-    if (it == end()) return {it, false};
-    std::shared_ptr<PageType> target_page = it.get_page();
-    if (target_page->is_full()) {
-      auto [new_page, new_offset] = buffer_pool_.get_new_page(target_page->next_page_offset_);
-      key_type mid_key = target_page->split_with(new_page.get());
-      btree_.insert_page(mid_key, translated_index(new_offset));
-      if (std::memcmp(&key, &mid_key, sizeof(key)) >= 0) {
-        target_page = std::move(new_page);
-      }
-    }
-    auto [page_it, inserted] = target_page->insert(record);
-    return {make_it(target_page, page_it), inserted};
+    std::cout << "Before page->insert\n";
+    auto [page_it, inserted] = page->insert(record, AllowDup);
+    std::cout << "After page->insert\n";
+    auto result = make_it(page, page_it);
+    std::cout << "After make_it\n";
+    return {result, inserted};
   }
 
   iterator erase(const value_type& record) {
     auto key = PageType::extract_key(record);
-    auto [btree_it, target_node] = btree_.find_page(key);
-    std::shared_ptr<PageType> target_page = buffer_pool_.get_page(translated_offset(target_node->page_index_));
+    auto [btree_it, target_node] = btree_->find_page(key);
+    std::shared_ptr<PageType> target_page = buffer_pool_->get_page(translated_offset(target_node->page_index_));
     auto page_it = target_page->erase(record);
     inspect_after_erase(page_it);
     if (page_it == target_page->end()) {
@@ -255,16 +263,16 @@ class DBBTree {
     PageType* page = dynamic_cast<PageType*>(it.get_page());  // page pointer owned by caller of inspect_after_erase
     uintmax_t sibling_offset = page->next_page_offset_;
     if (page->size() < page->max_size() / 2) {
-      std::shared_ptr<PageType> sibling = buffer_pool_.get_page(sibling_offset);
+      std::shared_ptr<PageType> sibling = buffer_pool_->get_page(sibling_offset);
       if (sibling->size() + page->size() <= page->max_size()) {
         page->merge_with(sibling.get());
-        btree_.erase_page(sibling->copy_min_key(), translated_index(sibling_offset));
-        buffer_pool_.discard_page(sibling->next_page_offset_);
+        btree_->erase_page(sibling->copy_min_key(), translated_index(sibling_offset));
+        buffer_pool_->discard_page(sibling->next_page_offset_);
       } else {
         key_type sibling_original_key = sibling->copy_min_key();
-        key_type mid_key = page->borrow_from(sibling.get());
-        btree_.erase_page(sibling_original_key, translated_index(sibling_offset));
-        btree_.insert_page(mid_key, translated_index(sibling_offset));
+        value_type mid_val = page->borrow_from(sibling.get());
+        btree_->erase_page(sibling_original_key, translated_index(sibling_offset));
+        btree_->insert_page(PageType::extract_key(mid_val), translated_index(sibling_offset));
       }
       // TODO: it is shifted
     }
@@ -272,15 +280,15 @@ class DBBTree {
   }
 
   iterator begin() {
-    auto btree_begin = btree_.begin();
-    if (btree_begin == btree_.end()) return end();
-    std::shared_ptr<PageType> leftmost_page = buffer_pool_.get_page(translated_offset(btree_begin.node_->children_[0]->page_index_));
+    auto btree_begin = btree_->begin();
+    if (btree_begin == btree_->end()) return end();
+    std::shared_ptr<PageType> leftmost_page = buffer_pool_->get_page(translated_offset(btree_begin.node_->children_[0]->page_index_));
     return make_it(leftmost_page, leftmost_page->begin());
   }
 
   iterator end() {
-    auto btree_last = btree_.end()--;
-    std::shared_ptr<PageType> rightmost_page = buffer_pool_.get_page(translated_offset(btree_last.node_->children_.back()->page_index_));
+    auto btree_last = btree_->end()--;
+    std::shared_ptr<PageType> rightmost_page = buffer_pool_->get_page(translated_offset(btree_last.node_->children_.back()->page_index_));
     return make_it(rightmost_page, rightmost_page->end());
   }
 };
