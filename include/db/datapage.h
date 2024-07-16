@@ -61,11 +61,11 @@ class DataPage {
     return key;
   }
 
-  virtual Record* get_record(size_t index) = 0;
-  virtual Record copy_record(size_t index) = 0;
-  virtual unsigned char* get_record_ptr(size_t index) = 0;
-  virtual Key* get_key(size_t index) = 0;
-  virtual Key copy_key(size_t index) = 0;
+  virtual Record* get_record(size_t index) const = 0;
+  virtual Record copy_record(size_t index) const = 0;
+  virtual unsigned char* get_record_ptr(size_t index) const = 0;
+  virtual Key* get_key(size_t index) const = 0;
+  virtual Key copy_key(size_t index) const = 0;
 
   class Iterator {
     DataPage<PAGE_SIZE, Record, Key>* page_;

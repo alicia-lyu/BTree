@@ -45,6 +45,8 @@ void test_DBBTree_insert_search() {
     auto pair = btree.insert(record);
     assert(pair.second == true);
 
+    assert(btree.verify_order());
+
     // Search for the inserted record
     auto it2 = btree.search(create_sample_record(1));
     assert(it2 != btree.end());
@@ -61,20 +63,25 @@ void test_DBBTree_iterator() {
     std::filesystem::remove(btree_path);
 
     // Create the DBBTree instance
-    DBBTree<false, 4, FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>> btree(pages_path, btree_path, MAX_PAGES);
+    DBBTree<true, 4, FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE>> btree(pages_path, btree_path, MAX_PAGES);
 
     // Insert multiple records
-    for (int i = 1; i <= 10; ++i) {
+    for (size_t i = 0; i < 100; ++i) {
         auto [it, inserted] = btree.insert(create_sample_record(i));
         assert(inserted == true);
     }
 
+    assert(btree.verify_order());
+
     // Iterate through the records and validate
-    int expected_id = 1;
+    size_t expected_id = 0;
     for (auto it = btree.begin(); it != btree.end(); ++it) {
         Record record = *it;
-        std::string id_str = std::to_string(expected_id);
-        assert(std::equal(id_str.begin(), id_str.end(), record.begin()));
+        Record expected = create_sample_record(expected_id);
+        if(!std::equal(expected.begin(), expected.end(), record.begin())) {
+            std::cout << "Expected: " << std::string(expected.begin(), expected.end()) << std::endl;
+            std::cout << "Actual: " << std::string(record.begin(), record.end()) << std::endl;
+        }
         ++expected_id;
     }
     std::cout << "DBBTree iterator test passed." << std::endl;

@@ -11,6 +11,7 @@
 #include <iostream>
 #include <fstream>
 #include <optional>
+#include <ostream>
 #include <stdexcept>
 
 template <size_t PAGE_SIZE, size_t RECORD_SIZE, size_t KEY_SIZE>
@@ -94,25 +95,25 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   size_t max_size() const override { return RECORD_COUNT; }
 
  protected:
-  Record* get_record(size_t index) override {
+  Record* get_record(size_t index) const override {
     Record* record_in_place = reinterpret_cast<Record*>(record_data_->data() + RECORD_SIZE * index);
     return record_in_place;
   }
 
-  Record copy_record(size_t index) override {
+  Record copy_record(size_t index) const override {
     Record record;
     std::copy(record_data_->data() + RECORD_SIZE * index, record_data_->data() + RECORD_SIZE * index + RECORD_SIZE, record.begin());
     return record;
   }
 
-  unsigned char* get_record_ptr(size_t index) override { return record_data_->data() + RECORD_SIZE * index; }
+  unsigned char* get_record_ptr(size_t index) const override { return record_data_->data() + RECORD_SIZE * index; }
 
-  Key* get_key(size_t index) override {
+  Key* get_key(size_t index) const override {
     Key* key_in_place = reinterpret_cast<Key*>(record_data_->data() + RECORD_SIZE * index);
     return key_in_place;
   }
 
-  Key copy_key(size_t index) override {
+  Key copy_key(size_t index) const override {
     Key key;
     std::copy(record_data_->data() + RECORD_SIZE * index, record_data_->data() + RECORD_SIZE * index + KEY_SIZE, key.begin());
     return key;
@@ -517,6 +518,18 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   iterator_type max() override { return retreat_to_valid(end()); }
 
   iterator_type min() override { return advance_to_valid(begin()); }
+
+  friend std::ostream& operator<<(std::ostream& os, const Self& page) {
+    os << "Page at offset " << page.page_offset_ << ":\n";
+    for (size_t i = 0; i < RECORD_COUNT; ++i) {
+      if (page.bitmap_->test(i)) {
+        os << "Record #" << i << ": " << page.record_to_string(*(page.get_record(i))).substr(0, 5) << std::endl;
+      } else {
+        os << "Record #" << i << ": Empty" << std::endl;
+      }
+    }
+    return os;
+  }
 };
 
 #endif  // FIXED_DATAPAGE_H

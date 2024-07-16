@@ -229,7 +229,7 @@ public:
       page_index_ = page_index;
     }
 
-    void transform_to_placeholder_page() noexcept {
+    void transform_to_leftmost_page(attr_t page_index = std::numeric_limits<attr_t>::min()) noexcept {
       assert(empty());
       assert(children_.empty());
       assert(height_ == 0);
@@ -242,7 +242,7 @@ public:
         keys_.push_back(std::numeric_limits<V>::min());
       }
       height_ = -1;
-      page_index_ = std::numeric_limits<attr_t>::min();
+      page_index_ = page_index;
       assert(validate_page());
     }
 
@@ -299,6 +299,7 @@ public:
 
     [[nodiscard]] bool is_placeholder_page() const {
       return page_index_ == std::numeric_limits<attr_t>::min();
+      // No index provided when transformed to leftmost page
     }
 
     [[nodiscard]] bool is_full() const noexcept {
@@ -457,9 +458,8 @@ private:
         else return nullptr;
       } else {
         Node * next_leaf = leftmost_leaf(node_->children_[index_ + 1].get());
-        if (next_leaf->children_.empty()) {
-          return nullptr;
-        } else return next_leaf->children_.front().get();
+        assert (!next_leaf->children_.empty());
+        return next_leaf->children_.front().get();
       }
     }
 
@@ -1729,15 +1729,14 @@ public:
   }
 
   std::pair<const_iterator_type, Node *> find_page(const K& key, attr_t page_index) const {
+    assert(size() > 0);
     const_iterator_type lb = find_lower_bound(key);
     if (lb == cend()) {
       auto it_begin = cbegin();
       assert(it_begin.node_->is_leaf());
-      assert(!it_begin.node_->children_.empty() || size() == 0);
-      // Only returning nullptr page if the tree is empty
-      Node * leftmost_page = it_begin.node_->children_.empty() ? nullptr : it_begin.node_->children_[0].get();
+      assert(!it_begin.node_->children_.empty());
+      Node * leftmost_page = it_begin.node_->children_[0].get();
       // The leftmost page can potentially hold any key arbitrarily small
-      // But it may be nullptr if the tree is empty
       return {cbegin(), leftmost_page};
     }
     for (const_iterator_type it = lb; it != cend(); ++it) {
@@ -1756,30 +1755,37 @@ public:
 
   std::pair<const_iterator_type, Node *> find_page_lb(const K& key) const {
     auto lb = find_lower_bound(key);
+    assert(size() > 0);
     if (lb == cend()) {
       // No lower bound, but the leftmost page can potentially hold any key arbitrarily small
       auto it_begin = cbegin();
-      assert(!it_begin.node_->children_.empty() || size() == 0);
-      Node * leftmost_page = it_begin.node_->children_.empty() ? nullptr : it_begin.node_->children_[0].get();
+      assert(!it_begin.node_->children_.empty());
+      Node * leftmost_page = it_begin.node_->children_[0].get();
       return {cbegin(), leftmost_page};
     }
     Node* page = lb.get_page();
+    // Records in this page is limited to [lb.key, (++lb).key))
+    // key is guaranteed to be larger than or equal to lb.key, because this is the definition of lower bound
+    // key is guranteed to be smaller than (++lb).key, otherwise (++lb).key would be the lower bound
+    // any record with key is guaranteed to belongs to this page
     return {lb, page};
   }
 
   std::pair<const_iterator_type, Node *> find_page_ceil(const K& key) const {
     auto ub = find_upper_bound(key);
+    assert(size() > 0);
     if (ub == cend()) { // no upper bound to key, return the rightmost page
       auto it_end = cend();
       Node * rightmost_page = std::prev(it_end).get_page();
       // Potentially any arbitrarily large record can be placed here
-      assert(rightmost_page || size() == 0);
-      // Could be nullptr if the tree is empty
+      assert(rightmost_page);
       return {std::prev(it_end), rightmost_page};
     }
     // the ceiling page that key can be placed in is ub's left page
-    --ub;
-    Node* page = ub.get_page();
+    Node* page = (--ub).get_page();
+    // Records in this page is limited to [(--ub).key, ub.key)
+    // key is guaranteed to be smaller than ub.key, because this is the definition of upper bound
+    // key is guaranteed to be larger than or equal to (--ub).key, otherwise (--ub).key would be the upper bound
     return {ub, page};
   }
 
@@ -1859,14 +1865,14 @@ protected:
     return hints;
   }
 
-  void insert_leftmost_page() {
+  void insert_leftmost_page(attr_t page_index = std::numeric_limits<attr_t>::min()) {
     // The first insert_page call:
     // Occupy the leftmost child, as it will never be filled.
     // TODO: Change to a real page, as smaller-key page may be inserted
     assert(size() == 0);
     assert(!root_->fathers_nodes_or_pages());
     auto page = make_node();
-    page->transform_to_placeholder_page();
+    page->transform_to_leftmost_page(page_index);
     page->parent_ = root_.get();
     page->index_ = 0;
     root_->children_.push_back(std::move(page));
@@ -1883,11 +1889,19 @@ public:
     return insert_value(std::move(key));
   }
 
+  iterator_type initialize_pages(const V& initial_key, attr_t index_right, attr_t index_left = std::numeric_limits<attr_t>::min()) {
+    assert(size() == 0);
+    insert_leftmost_page(index_left);
+    if constexpr (AllowDup) {
+      return insert_page(initial_key, index_right);
+    } else {
+      return insert_page(initial_key, index_right).first;
+    }
+  }
+
   std::conditional_t<AllowDup, iterator_type, std::pair<iterator_type, bool>>
   insert_page(const V &lb_key, size_t page_index) {
-    if (size() == 0 && !root_->fathers_nodes_or_pages()) {
-      insert_leftmost_page();
-    }
+    assert(size() > 0 || root_->fathers_nodes_or_pages());
 
     auto it = insert_value(lb_key);
 

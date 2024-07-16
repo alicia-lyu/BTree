@@ -68,6 +68,7 @@ class BufferPool {
 
   // Simplified LRU: Only getting touches a page
   PagePtr get_page(uintmax_t offset, std::optional<uintmax_t> next_page_offset = std::nullopt) {
+    if (offset == std::numeric_limits<uintmax_t>::max()) return nullptr;
     auto map_it = page_map_.find(offset);
     if (map_it != page_map_.end()) {
       // Move accessed page to the front of the list
