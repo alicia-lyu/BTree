@@ -41,7 +41,7 @@ void test_page_erase() {
     std::filesystem::path page_path = get_new_pages_file(1);
     uintmax_t file_offset = PAGE_SIZE;
 
-    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset, 0);
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset, std::numeric_limits<uintmax_t>::max());
 
     // Insert records to fill up the page
     for (size_t i = 0; i < page.RECORD_COUNT; ++i) {
@@ -66,13 +66,13 @@ void test_page_erase() {
 void test_page_split() {
     std::filesystem::path page_path = get_new_pages_file(2);
 
-    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page1(page_path, PAGE_SIZE, 0);
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page1(page_path, PAGE_SIZE, std::numeric_limits<uintmax_t>::max());
 
     for (size_t i = 0; i < page1.RECORD_COUNT; ++i) {
         page1.insert(create_sample_record(i));
     }
 
-    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page2(page_path, PAGE_SIZE * 2, 0);
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page2(page_path, PAGE_SIZE * 2, std::numeric_limits<uintmax_t>::max());
 
     page1.split_with(&page2);
 
@@ -86,9 +86,9 @@ void test_page_split() {
 void test_page_merge() {
     std::filesystem::path page_path = get_new_pages_file(2);
 
-    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page1(page_path, PAGE_SIZE, 0);
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page1(page_path, PAGE_SIZE, std::numeric_limits<uintmax_t>::max());
 
-    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page2(page_path, PAGE_SIZE * 2, 0);
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page2(page_path, PAGE_SIZE * 2, std::numeric_limits<uintmax_t>::max());
 
     for (size_t i = 0; i < page1.RECORD_COUNT / 2; ++i) {
         page1.insert(create_sample_record(i));
@@ -101,9 +101,9 @@ void test_page_merge() {
 void test_page_borrow() {
     std::filesystem::path page_path = get_new_pages_file(2);
 
-    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page1(page_path, PAGE_SIZE, 0);
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page1(page_path, PAGE_SIZE, std::numeric_limits<uintmax_t>::max());
 
-    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page2(page_path, PAGE_SIZE * 2, 0);
+    FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page2(page_path, PAGE_SIZE * 2, std::numeric_limits<uintmax_t>::max());
 
     for (size_t i = 0; i < page1.RECORD_COUNT / 2; ++i) {
         page1.insert(create_sample_record(i));
@@ -117,4 +117,12 @@ void test_page_borrow() {
     page1.borrow_from(&page2);
 }
 
-int main() {}
+int main() {
+    test_page_serialization();
+    test_page_erase();
+    test_page_split();
+    test_page_merge();
+    test_page_borrow();
+    std::cout << "All tests passed!" << std::endl;
+    return 0;
+}

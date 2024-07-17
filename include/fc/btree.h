@@ -1728,40 +1728,37 @@ public:
     return const_iterator_type(find_upper_bound(key));
   }
 
-  std::pair<const_iterator_type, Node *> find_page(const K& key, attr_t page_index) const {
+  std::pair<const_iterator_type, Node *> find_page(const K& page_key, attr_t page_index) const {
     assert(size() > 0);
-    const_iterator_type lb = find_lower_bound(key);
+    const_iterator_type lb = find(page_key);
     if (lb == cend()) {
-      auto it_begin = cbegin();
-      assert(it_begin.node_->is_leaf());
-      assert(!it_begin.node_->children_.empty());
-      Node * leftmost_page = it_begin.node_->children_[0].get();
-      // The leftmost page can potentially hold any key arbitrarily small
-      return {cbegin(), leftmost_page};
+      // Not page associated with this key found
+      return {end(), nullptr};
     }
+    if constexpr (!AllowDup) return {lb, lb.get_page()};
+    // AllowDup, only getting the first equal key
     for (const_iterator_type it = lb; it != cend(); ++it) {
       Node* page = it.get_page();
       assert(page); // Page must be inserted when the key is
       if (page->page_index_ == page_index) {
-        assert(page->get_page_key() == key);
+        assert(page->get_page_key() == page_key);
         return {it, page};
       }
-      if (Comp{}(key, page->get_page_key())) {
+      if (Comp{}(page_key, page->get_page_key())) { // passed the key
         break;
       }
     }
     return {end(), nullptr};
   }
 
+  // Returning the first page with the key not less than key
+  // i.e. page key can be equal to or larger than key
   std::pair<const_iterator_type, Node *> find_page_lb(const K& key) const {
-    auto lb = find_lower_bound(key);
     assert(size() > 0);
+    auto lb = find_lower_bound(key);
     if (lb == cend()) {
-      // No lower bound, but the leftmost page can potentially hold any key arbitrarily small
-      auto it_begin = cbegin();
-      assert(!it_begin.node_->children_.empty());
-      Node * leftmost_page = it_begin.node_->children_[0].get();
-      return {cbegin(), leftmost_page};
+      // No page with key not less than key
+      return {end(), nullptr};
     }
     Node* page = lb.get_page();
     // Records in this page is limited to [lb.key, (++lb).key))
@@ -1771,23 +1768,43 @@ public:
     return {lb, page};
   }
 
-  std::pair<const_iterator_type, Node *> find_page_ceil(const K& key) const {
-    auto ub = find_upper_bound(key);
+  // Returning the first page with the key greater than key
+  std::pair<const_iterator_type, Node *> find_page_ub(const K& key) const {
     assert(size() > 0);
-    if (ub == cend()) { // no upper bound to key, return the rightmost page
-      auto it_end = cend();
-      Node * rightmost_page = std::prev(it_end).get_page();
-      // Potentially any arbitrarily large record can be placed here
-      assert(rightmost_page);
-      return {std::prev(it_end), rightmost_page};
+    auto ub = find_upper_bound(key);
+    if (ub == cend()) {
+      // No page with key greater than key
+      return {end(), nullptr};
     }
     // the ceiling page that key can be placed in is ub's left page
-    Node* page = (--ub).get_page();
+    Node* page = ub.get_page();
     // Records in this page is limited to [(--ub).key, ub.key)
     // key is guaranteed to be smaller than ub.key, because this is the definition of upper bound
     // key is guaranteed to be larger than or equal to (--ub).key, otherwise (--ub).key would be the upper bound
     return {ub, page};
   }
+
+  // Find the first page that can hold key
+  // i.e. page key <= key <= next page key
+  std::pair<const_iterator_type, Node *> find_page(const K& key) const {
+    assert(size() > 0);
+    auto lb = find_lower_bound(key);
+    if (lb == end()) {
+      // return the rightmost page which can hold arbitrarily large key
+      return {std::prev(end()), std::prev(end()).get_page()};
+    }
+    if (Comp{}(key, *lb)) { // lb is actually next page key
+      if (lb == begin()) {
+        // return the leftmost page which can hold arbitrarily small key
+        auto leftmost_page = leftmost_leaf(root_.get())->children_.front().get();
+        return {end(), leftmost_page};
+      } else {
+        --lb;
+      }
+    }
+    return {lb, lb.get_page()};
+  }
+
 
   std::ranges::subrange<iterator_type> equal_range(const K &key) {
     return {iterator_type(find_lower_bound(key)),
@@ -1868,7 +1885,6 @@ protected:
   void insert_leftmost_page(attr_t page_index = std::numeric_limits<attr_t>::min()) {
     // The first insert_page call:
     // Occupy the leftmost child, as it will never be filled.
-    // TODO: Change to a real page, as smaller-key page may be inserted
     assert(size() == 0);
     assert(!root_->fathers_nodes_or_pages());
     auto page = make_node();

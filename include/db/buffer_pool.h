@@ -111,6 +111,7 @@ class BufferPool {
       std::filesystem::resize_file(pages_path_, file_size_);
       empty_pages_start = file_size_;
     }
+    assert(new_offset != 0 && new_offset != std::numeric_limits<uintmax_t>::max());
     return {get_page(new_offset, next_page_offset), new_offset};
   }
 

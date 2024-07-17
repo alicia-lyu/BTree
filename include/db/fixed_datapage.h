@@ -24,6 +24,8 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   using Record = std::array<unsigned char, RECORD_SIZE>;
   using typename Base::KeyOrRecord;
 
+  uintmax_t page_offset_;
+
  private:
   static constexpr size_t DATA_SIZE = RECORD_COUNT * RECORD_SIZE;
   using RecordData = std::array<unsigned char, DATA_SIZE>;
@@ -33,12 +35,13 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   std::unique_ptr<std::bitset<RECORD_COUNT>> bitmap_;  // 0 for free, 1 for occupied
   std::unique_ptr<RecordData> record_data_;
   std::filesystem::path path_;
-  uintmax_t page_offset_;
 
  public:
   FixedRecordDataPage(std::filesystem::path p, uintmax_t file_offset, std::optional<uintmax_t> next_page_offset = std::nullopt)
-      : path_(p), page_offset_(file_offset) {
-    if (file_offset == 0) throw std::runtime_error("Metadata offset");
+      : page_offset_(file_offset), path_(p) {
+    assert(file_offset != 0);
+    assert(next_page_offset != 0);
+    
     bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>();
     record_data_ = std::make_unique<RecordData>();
 
@@ -60,6 +63,8 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     if (!file.read(reinterpret_cast<char*>(record_data_.get()), sizeof(RecordData))) {
       throw std::runtime_error("Failed to read record data");
     }
+    std::cout << "Deserialized " << *this << std::endl;
+    assert(this->next_page_offset_ != 0);
   }
 
   FixedRecordDataPage() {
@@ -70,6 +75,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
   ~FixedRecordDataPage() {
     std::ofstream file(path_, std::ios::binary);
+    std::cout << "Serializing " << *this << std::endl;
     file.seekp(page_offset_);
     if (!file.write(reinterpret_cast<char*>(&this->next_page_offset_), sizeof(uintmax_t))) {
       std::cerr << "Error: Failed to write next page offset" << std::endl;
@@ -149,11 +155,22 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   size_t find_first_occupied(size_t index, size_t lower_bound = 0, size_t upper_bound = RECORD_COUNT)
   // scanning is memory-efficient, as bitmap is expected to fit into cache line
   {
-    size_t to_left = index;
-    size_t to_right = index;
-    while (to_left >= lower_bound || to_right < upper_bound) {
-      if (to_left >= lower_bound && (*bitmap_)[to_left] == true) return to_left;
-      if (to_right < upper_bound && (*bitmap_)[to_right] == true) return to_right;
+    // std::cout << "Finding first occupied from " << index << " in [" << lower_bound << ", " << upper_bound << ")" << std::endl;
+    // std::cout << "Bitmap: " << bitmap_->to_string() << std::endl;
+    assert(index >= lower_bound && index < upper_bound);
+    int to_left = index;
+    int to_right = index;
+    int lower_bound_int = static_cast<int>(lower_bound);
+    int upper_bound_int = static_cast<int>(upper_bound);
+    while (to_left >= lower_bound_int || to_right < upper_bound_int) {
+      if (to_left >= lower_bound_int && bitmap_->test(to_left)) {
+        // std::cout << "Found at " << to_left << std::endl;
+        return to_left;
+      }
+      if (to_right < upper_bound_int && bitmap_->test(to_right)) {
+        // std::cout << "Found at " << to_right << std::endl;
+        return to_right;
+      }
       --to_left;
       ++to_right;
     }
@@ -163,38 +180,37 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
  public:
   bool validate(iterator_type it) override { return get_bit(it) == true; }
 
-  // LATER: Migrate to SIMD (How to handle bitmap jumps?)
+  // Returns the iterator to the first element that is greater than or equal to key_or_record
   iterator_type search_lb(const KeyOrRecord& key_or_record) override {
-    if (bitmap_->count() == 0) return end();
-    size_t left = find_first_occupied(0);  // inclusive
-    auto ret = std::memcmp(Base::get_data(key_or_record), get_record_ptr(left), Base::get_size(key_or_record));
-    if (ret == 0)
-      return iterator_type(this, left);  // Early return helps guarantee left < key_or_record
-    else if (ret < 0)
-      return end();  // key_or_record is less than the first element
-
-    size_t right = find_first_occupied(RECORD_COUNT) + 1;  // exclusive
+    size_t left = find_first_occupied(0); // inclusive
+    size_t right = RECORD_COUNT;  // exclusive
     // Note that left is guaranteed to be occupied, while right is not.
-    while (get_occupancy_in_range(left, right) > 1)  // lock in to one entry
+    while (right - left > 1)  // lock in to one entry
     {
       size_t mid = find_first_occupied(left + (right - left) / 2, left, right);
+      // std::cout << "left: " << left << ", right: " << right << ", mid: " << mid << std::endl;
       if (mid == RECORD_COUNT)  // no valid records between [left, right)
-        return iterator_type(this, left);
-      auto record_mid_ptr = get_record_ptr(mid);  // Get the whole record but only comparing the first KEY_SIZE bytes.
+        return end();
+      auto record_mid_ptr = get_record_ptr(mid);
       int ret = std::memcmp(Base::get_data(key_or_record), record_mid_ptr, Base::get_size(key_or_record));
-      if (ret < 0)  // lb is less than mid
-        right = mid;
-      else if (ret == 0)  // lb is less than or equal to mid
+      if (ret <= 0)  // lb is less than or equal to mid
       {
         right = mid + 1;
-        // Only having `right = mid + 1` may enter into infinite loop, when right keeps being reset to left + 2
-        if (get_occupancy_in_range(left, right) == 2) {  // 2: left and mid
-          // left is guaranteed to be smaller (comes from the last arm)
+        if (right - left == 2) {
+          // we must find out if lb is equal to mid
+          if (bitmap_->test(left) == true) {
+            auto record_left_ptr = get_record_ptr(left);
+            if (std::memcmp(Base::get_data(key_or_record), record_left_ptr, Base::get_size(key_or_record)) <= 0) {
+              right = mid;
+              continue;
+            }
+          }
           left = mid;
         }
-      } else if (ret > 0)  // lb is greater than or equal to mid (although mid is smaller, but mid+1 can be bigger)
-        left = mid;
+      } else if (ret > 0)  // lb is greater than mid
+        left = mid + 1;
     }
+    // std::cout << "lb is " << left << std::endl;
     // If there is any element equal to key_or_record, left is equal.
     return iterator_type(this, left);
   }
@@ -202,7 +218,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
   iterator_type search_ub(const KeyOrRecord& key_or_record) override {
     if (bitmap_->count() == 0) return begin();
     size_t left = 0;  // inclusive
-    size_t right = find_first_occupied(RECORD_COUNT);
+    size_t right = find_first_occupied(RECORD_COUNT - 1);
     auto ret = std::memcmp(Base::get_data(key_or_record), get_record_ptr(right), Base::get_size(key_or_record));
     if (ret >= 0) {
       if (right == RECORD_COUNT - 1)
@@ -265,7 +281,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
   std::pair<iterator_type, bool> insert(const Record& record, bool allow_dup = true) override {
     if (bitmap_->count() == RECORD_COUNT) return {end(), false};  // page is full, split to be managed by page owner
-    
+
     iterator_type ub = end();
     if (!allow_dup) {
       iterator_type lb = search_lb(record);
@@ -303,10 +319,9 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     // LATER: Migrate to std::shift_left and std::shift_right
     if (before_ub) {
       // all bits between (records_it, ub-1] need to shift 1 pos forward, overwriting bitmap[records_it]
-      std::move(
-        record_data_->begin() + (it.index_ + 1) * RECORD_SIZE,
-        record_data_->begin() + ub.index_ * RECORD_SIZE,
-        record_data_->begin() + (it.index_) * RECORD_SIZE);
+      std::move(record_data_->begin() + (it.index_ + 1) * RECORD_SIZE,
+                record_data_->begin() + ub.index_ * RECORD_SIZE,
+                record_data_->begin() + (it.index_) * RECORD_SIZE);
       --ub;
       while (it < ub) {
         set_bit(it, get_bit(it));
@@ -315,10 +330,9 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
       // leaving an empty seat at ub-1, which should be set to true
     } else {
       // all bit between [ub, records_it) need to shift 1 pos backward, overwriting bitmap[records_it]
-      std::move(
-        record_data_->begin() + ub.index_ * RECORD_SIZE,
-        record_data_->begin() + it.index_ * RECORD_SIZE,
-        record_data_->begin() + (ub.index_ + 1) * RECORD_SIZE);
+      std::move(record_data_->begin() + ub.index_ * RECORD_SIZE,
+                record_data_->begin() + it.index_ * RECORD_SIZE,
+                record_data_->begin() + (ub.index_ + 1) * RECORD_SIZE);
       while (it > ub) {
         set_bit(it, get_bit(it - 1));
         --it;
@@ -355,7 +369,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     // Perform a dynamic_cast to check if right_sibling is of type Self
     Self* right_sibling_self = dynamic_cast<Self*>(right_sibling);
     assert(right_sibling_self && "right_sibling is not of the correct type");
-
+    assert(is_full());
     assert(right_sibling_self->bitmap_->none());
 
     auto empty_start = solidify();
@@ -521,13 +535,15 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
   friend std::ostream& operator<<(std::ostream& os, const Self& page) {
     os << "Page at offset " << page.page_offset_ << ":\n";
+    os << "next_page_offset_: " << page.next_page_offset_ << std::endl;
     for (size_t i = 0; i < RECORD_COUNT; ++i) {
       if (page.bitmap_->test(i)) {
-        os << "Record #" << i << ": " << page.record_to_string(*(page.get_record(i))).substr(0, 5) << std::endl;
+        os << "#" << i << ": " << page.record_to_string(*(page.get_record(i))).substr(0, 5) << "...; ";
       } else {
-        os << "Record #" << i << ": Empty" << std::endl;
+        os << "#" << i << ": Empty" << "; ";
       }
     }
+    os << std::endl;
     return os;
   }
 };

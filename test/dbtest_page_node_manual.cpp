@@ -41,7 +41,7 @@ int main() {
         assert(page_res_lb.first != btree.end());
         assert(page_res.second->get_page_key() == num);
 
-        auto page_res_ceil = btree.find_page_ceil(num);
+        auto page_res_ceil = btree.find_page_ub(num);
         assert(page_res_ceil.second != nullptr);
         assert(page_res_ceil.first != btree.end());
         assert(page_res.second->get_page_key() == num);
