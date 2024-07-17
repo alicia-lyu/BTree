@@ -43,7 +43,9 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     assert(next_page_offset != 0);
     
     bitmap_ = std::make_unique<std::bitset<RECORD_COUNT>>();
+    bitmap_->reset();
     record_data_ = std::make_unique<RecordData>();
+    std::fill(record_data_->begin(), record_data_->end(), static_cast<unsigned char>('\0'));
 
     if (next_page_offset != std::nullopt) {
       this->next_page_offset_ = next_page_offset.value();
@@ -65,6 +67,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
     }
     std::cout << "Deserialized " << *this << std::endl;
     assert(this->next_page_offset_ != 0);
+    file.close();
   }
 
   FixedRecordDataPage() {
@@ -75,7 +78,7 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
 
   ~FixedRecordDataPage() {
     std::ofstream file(path_, std::ios::binary);
-    std::cout << "Serializing " << *this << std::endl;
+    std::cout << "Serializing " << *this;
     file.seekp(page_offset_);
     if (!file.write(reinterpret_cast<char*>(&this->next_page_offset_), sizeof(uintmax_t))) {
       std::cerr << "Error: Failed to write next page offset" << std::endl;
@@ -94,6 +97,25 @@ class FixedRecordDataPage : public DataPage<PAGE_SIZE, std::array<unsigned char,
       std::cout << "FixedRecordDataPage at offset " << page_offset_ << ": Padding " << padding << " bytes to page in file" << path_ << std::endl;
       file.write(std::string(padding, '\0').c_str(), padding);
     }
+
+    std::flush(file);
+    file.close();
+
+    // std::ifstream file2(path_, std::ios::binary);
+    // file2.seekg(page_offset_);
+    // uintmax_t next_page_offset;
+    // std::bitset<RECORD_COUNT> bitmap;
+    // RecordData record_data;
+    // file2.read(reinterpret_cast<char*>(&next_page_offset), sizeof(uintmax_t));
+    // file2.read(reinterpret_cast<char*>(&bitmap), sizeof(std::bitset<RECORD_COUNT>));
+    // file2.read(reinterpret_cast<char*>(&record_data), sizeof(RecordData));
+    // assert(next_page_offset == this->next_page_offset_);
+    // assert(bitmap == *bitmap_);
+    // assert(record_data == *record_data_);
+
+    // std::cout << "Deserialization check pased." << std::endl;
+    // file2.close();
+
   }
 
   size_t size() const override { return bitmap_->count(); }

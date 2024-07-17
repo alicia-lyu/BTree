@@ -50,10 +50,11 @@ class BufferPool {
     if (!pages_file.read(reinterpret_cast<char*>(discarded_page_offsets.data()), discarded_page_count * sizeof(uint))) {
       throw std::runtime_error("Failed to read discarded page indexes");
     }
+    pages_file.close();
   }
 
   ~BufferPool() {
-    std::ofstream pages_file(pages_path_, std::ios::binary | std::ios::trunc);
+    std::ofstream pages_file(pages_path_, std::ios::binary);
     size_t discarded_page_count = discarded_page_offsets.size();
     pages_file.write(reinterpret_cast<const char*>(&empty_pages_start), sizeof(empty_pages_start));
     pages_file.write(reinterpret_cast<const char*>(&discarded_page_count), sizeof(discarded_page_count));
@@ -64,6 +65,7 @@ class BufferPool {
     } else if (padding < 0) {
       std::cerr << "Padding for buffer pool metadata is negative" << std::endl;
     }
+    pages_file.close();
   }
 
   // Simplified LRU: Only getting touches a page
@@ -85,6 +87,10 @@ class BufferPool {
       if (pages_it->second.use_count() > 1) {
         throw std::runtime_error("All pages are in use");
       } else {
+        auto page_offset = pages_it->second->page_offset_;
+        if (page_offset + PageType::PAGE_SIZE_CONST > std::filesystem::file_size(pages_path_)) {
+          std::filesystem::resize_file(pages_path_, file_size_);
+        }
         page_map_.erase(pages_it->first);
         pages_.erase(pages_it);
         assert(page_map_.contains(pages_it->first) == false);
@@ -108,7 +114,6 @@ class BufferPool {
     } else {
       new_offset = file_size_;
       file_size_ += PageType::PAGE_SIZE_CONST;
-      std::filesystem::resize_file(pages_path_, file_size_);
       empty_pages_start = file_size_;
     }
     assert(new_offset != 0 && new_offset != std::numeric_limits<uintmax_t>::max());

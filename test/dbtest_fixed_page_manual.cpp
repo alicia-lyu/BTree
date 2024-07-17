@@ -25,6 +25,7 @@ void test_page_serialization() {
 
     {
         FixedRecordDataPage<PAGE_SIZE, RECORD_SIZE, KEY_SIZE> page(page_path, file_offset);
+        assert(page.next_page_offset_ == PAGE_SIZE * 2);
         auto page_it = page.begin();
         for (size_t i = 0; i < page.RECORD_COUNT; ++i, ++page_it) {
             auto record = *page_it;

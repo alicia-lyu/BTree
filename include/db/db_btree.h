@@ -307,6 +307,8 @@ class DBBTree {
         btree_->erase_page(sibling->copy_min_key(), translated_index(sibling_offset));
         page->merge_with(sibling.get());
         buffer_pool_->discard_page(sibling->next_page_offset_);
+        // TODO: Check memory safety for merged sibling
+        // Shared pointer should still be valid
       } else {
         std::cout << "Borrowing from " << sibling->page_offset_ << "to " << page->page_offset_ << std::endl;
         key_type sibling_original_key = sibling->copy_min_key();
@@ -345,7 +347,7 @@ class DBBTree {
     std::cout << "Verifying order" << std::endl;
     for (iterator it = begin(); it != this->end(); ++it, ++i) {
       if (it.get_page() != prev_page) {
-        std::cout << *(it.get_page()) << std::endl;
+        std::cout << "Switching to a new page at " << it.get_page()->page_offset_ << ", next page: " << it.get_page()->next_page_offset_ << std::endl;
       }
       if (std::memcmp(&prev, &*it, sizeof(value_type)) > 0) {
         std::cout << "Order violation: " << std::string(prev.begin(), prev.begin() + 5) << " vs " << std::string(it->begin(), it->begin() + 5)
